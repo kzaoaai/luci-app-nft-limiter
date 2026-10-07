@@ -4,7 +4,8 @@
 		"read": {
 			"uci": [ "nft-limiter" ],
 			"file": {
-				"/usr/sbin/nft": [ "exec" ]
+				"/usr/sbin/nft": [ "exec" ],
+				"/sbin/ip": [ "exec" ]
 			}
 		},
 		"write": {

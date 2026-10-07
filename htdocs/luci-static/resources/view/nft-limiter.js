@@ -77,6 +77,32 @@ function ip4ToInt(s) {
     return (p[0] * 16777216) + (p[1] * 65536) + (p[2] * 256) + p[3];
 }
 
+function intToIp4(n) {
+    return [ n >>> 24, (n >>> 16) & 255, (n >>> 8) & 255, n & 255 ].join('.');
+}
+
+// Subnets of the router's own LANs/VLANs as dropdown entries: every
+// static-address interface's IPv4 network, e.g. guest -> 192.168.2.0/24.
+// Uplinks (DHCP/PPPoE, or a static one with a default gateway such as a 4G
+// modem), tunnels and loopback are left out.
+function networkTargets(networks) {
+    var out = [], seen = {};
+    networks.forEach(function(net) {
+        if (net.getName() === 'loopback' || net.getProtocol() !== 'static') return;
+        if (net.getGatewayAddr()) return;
+        (net.getIPAddrs() || []).forEach(function(a) {
+            var p = String(a).split('/'), len = +p[1];
+            if (!isIp4(p[0]) || !(len >= 0 && len <= 32)) return;
+            var mask = len ? (0xFFFFFFFF << (32 - len)) >>> 0 : 0;
+            var cidr = intToIp4((ip4ToInt(p[0]) & mask) >>> 0) + '/' + len;
+            if (seen[cidr]) return;
+            seen[cidr] = true;
+            out.push({ val: cidr, name: net.getName() });
+        });
+    });
+    return out.sort(function(a, b) { return a.name < b.name ? -1 : a.name > b.name ? 1 : 0; });
+}
+
 // Accept a single IPv4/IPv6, a v4/v6 CIDR, or an IPv4 range a.b.c.d-e.f.g.h.
 // The backend (root/usr/bin/nft-limiter) handles all of these natively.
 function validateTarget(value) {
@@ -119,10 +145,19 @@ function parseCounters(jsonStr) {
     }
 }
 
+// Sum the IPv4 rule and its IPv6 companion (<tag> and <tag>6, e.g. dev_0_dl
+// and dev_0_dl6; pass rules dev_0_dl_pass and dev_0_dl6_pass).
 function cell(counters, comment) {
-    var c = counters[comment];
-    if (!c) return '—';
-    return fmtBytes(c.bytes) + ' (' + c.packets + ' pkts)';
+    var parts = [ counters[comment] ];
+    var m = comment.match(/^(dev_\d+_(?:dl|ul))(_pass)?$/);
+    if (m) parts.push(counters[m[1] + '6' + (m[2] || '')]);
+    var bytes = 0, packets = 0, any = false;
+    parts.forEach(function(c) {
+        if (!c) return;
+        any = true; bytes += c.bytes; packets += c.packets;
+    });
+    if (!any) return '—';
+    return fmtBytes(bytes) + ' (' + packets + ' pkts)';
 }
 
 function statsRows(counters) {
@@ -130,9 +165,10 @@ function statsRows(counters) {
     uci.sections('nft-limiter', 'device').forEach(function(dev, idx) {
         var target = dev.target || '—';
         var label = dev.comment ? (dev.comment + ' — ' + target) : target;
-        var enabled = (dev.enable !== '0');
+        if (dev.enable === '0') label += ' ' + _('(disabled)');
+        else if (dev.block === '1') label += ' ' + _('(blocked)');
         rows.push([
-            enabled ? label : (label + ' ' + _('(disabled)')),
+            label,
             cell(counters, 'dev_' + idx + '_dl_pass'),
             cell(counters, 'dev_' + idx + '_dl'),
             cell(counters, 'dev_' + idx + '_ul_pass'),
@@ -274,10 +310,8 @@ return view.extend({
             return opt;
         };
 
-        m = new form.Map('nft-limiter', _('NFT Limiter'), _(
-            'Per-device bandwidth control via nftables rate limiting. ' +
-            'Requires OpenWrt 25.12+ with firewall4 / nftables.'
-        ));
+        // The Map's description is shown beside its title (decorateMap).
+        m = new form.Map('nft-limiter', _('NFT Limiter'));
 
         // ------------------------------------------------------------------
         // Global settings section
@@ -379,15 +413,46 @@ return view.extend({
         s.addremove = true;
         s.sortable  = true;
         s.nodescription = true;
-        s.description = _('Targets are matched most-specific first: a single IP (or smaller subnet) takes priority over a broader subnet or range that contains it, regardless of row order. Two partially overlapping ranges cannot both apply where they overlap.');
+        // Shown as a "?" hint on the section heading (decorateMap).
+        var deviceHelp = _('Targets are matched most-specific first: a single IP (or smaller subnet) takes priority over a broader subnet or range that contains it, regardless of row order. Two partially overlapping ranges cannot both apply where they overlap.') + ' ' +
+            _('A single IPv4 device whose MAC is known is also matched on IPv6, sharing the same limit. Subnets and ranges apply to IPv4 only. Block drops the device\'s WAN traffic instead of limiting it.');
 
         // enable toggle
-        o = s.option(form.Flag, 'enable', _('On'));
+        // Column widths: fixed for the short fields, the rest shared by
+        // Device and Comment. The grid CSS (see render) makes each input
+        // fill its cell, so these widths are what the fields get.
+        o = s.option(form.Flag, 'enable', _('Enabled'));
         o.default = '1';
         o.rmempty = false;
         o.editable = true;
+        o.width = 36;
+
+        // Compact one-line grid headers, with the full wording on hover. The
+        // Edit dialog keeps each option's full title.
+        var shortHeads = {
+            enable:    [ '\u2713', _('Enabled') ],
+            download:  [ _('Down'), _('Download limit (Mbit/s)') ],
+            upload:    [ _('Up'), _('Upload limit (Mbit/s)') ],
+            timestart: [ _('Start'), _('Time start (HH:MM)') ],
+            timeend:   [ _('End'), _('Time end (HH:MM)') ]
+        };
+        var origHeaderRows = s.renderHeaderRows;
+        s.renderHeaderRows = function() {
+            var rows = origHeaderRows.apply(this, arguments);
+            var ths = rows.querySelectorAll('tr.cbi-section-table-titles th');
+            var cols = this.children.filter(function(opt) { return !opt.modalonly; });
+            cols.forEach(function(opt, i) {
+                var head = shortHeads[opt.option], th = ths[i];
+                if (!head || !th) return;
+                dom.content(th, head[0]);
+                th.title = head[1];
+                if (opt.option === 'enable') th.style.textAlign = 'center';
+            });
+            return rows;
+        };
 
         o = s.option(form.Value, 'target', _('Device (IP / Range)'));
+        o.width = '22%';
         o.rmempty   = false;
         o.editable  = true;
         o.placeholder = _('IP, CIDR, or IP range (a.b.c.d-e.f.g.h)');
@@ -396,8 +461,11 @@ return view.extend({
             return _('Enter an IP, CIDR, or IPv4 range (a.b.c.d-e.f.g.h)');
         };
         var namedDevices = [], unnamedDevices = [];
+        var macByIp4 = {};
         hints.getMACHints().forEach(function(entry) {
             var mac  = entry[0];
+            var ip4  = hints.getIPAddrByMACAddr(mac);
+            if (ip4) macByIp4[ip4] = mac.toLowerCase();
             var name = hints.getHostnameByMACAddr(mac) || '';
             var ip   = hints.getIPAddrByMACAddr(mac);
             var ip6  = hints.getIP6AddrByMACAddr(mac);
@@ -419,14 +487,55 @@ return view.extend({
             }
             return a.val < b.val ? -1 : a.val > b.val ? 1 : 0;
         });
+        // Whole networks first, then devices.
+        var netNames = {};
+        networkTargets(networks).forEach(function(n) {
+            netNames[n.val] = n.name;
+            o.value(n.val, E('span', { 'title': _('Whole network') }, [
+                E('strong', {}, n.name), ' \u2014 ' + n.val
+            ]));
+        });
         namedDevices.concat(unnamedDevices).forEach(function(d) { o.value(d.val, deviceLabel(d.label, d.ip)); });
         o.textvalue = function(section_id) {
             var val = this.cfgvalue(section_id);
             if (!val) return '';
+            if (netNames[val]) return netNames[val] + ' \u2014 ' + val;
             var name = hints.getHostnameByIPAddr(val)
                     || hints.getHostnameByIP6Addr(val);
             if (name) return name + ' \u2014 ' + val;
             return val;
+        };
+
+        // Block: drop all of the device's WAN traffic (both directions, IPv4
+        // and IPv6) instead of rate-limiting it. Sits just before Down/Up and
+        // greys them out while ticked; their values are kept but ignored.
+        // Follows the row's time window and days like a limit.
+        var lockSpeeds = function(node, locked) {
+            if (!node) return;
+            node.querySelectorAll('input').forEach(function(i) { i.disabled = locked; });
+            node.style.opacity = locked ? '0.4' : '';
+            node.title = locked ? _('Ignored while Block is ticked') : '';
+        };
+        o = s.option(form.Flag, 'block', _('Block'));
+        o.default = '0';
+        o.editable = true;
+        o.width = 52;
+        o.onchange = function(ev, section_id, value) {
+            var sect = this.section;
+            ['download', 'upload'].forEach(function(name) {
+                var el = sect.getUIElement(section_id, name);
+                lockSpeeds(el && el.node, value === '1');
+            });
+        };
+        // Down/Up render locked when the row is already blocked.
+        var lockIfBlocked = function(opt) {
+            var origRender = opt.renderWidget;
+            opt.renderWidget = function(section_id) {
+                var node = origRender.apply(this, arguments);
+                lockSpeeds(node, uci.get('nft-limiter', section_id, 'block') === '1');
+                return node;
+            };
+            return opt;
         };
 
         // download limit
@@ -434,26 +543,93 @@ return view.extend({
         o.datatype = 'ufloat';
         o.placeholder = '0';
         o.editable = true;
+        o.width = 72;
+        lockIfBlocked(o);
 
         // upload limit
         o = s.option(form.Value, 'upload', _('Up (Mbit/s)'));
         o.datatype = 'ufloat';
         o.placeholder = '0';
         o.editable = true;
+        o.width = 72;
+        lockIfBlocked(o);
 
         // time start / end
-        addTimeOption(s, 'timestart', _('Time Start')).width = '8%';
-        addTimeOption(s, 'timeend', _('Time End')).width = '8%';
+        addTimeOption(s, 'timestart', _('Time Start')).width = 84;
+        addTimeOption(s, 'timeend', _('Time End')).width = 84;
 
         // weekday selector (none checked = every day), editable inline in the grid
         o = addWeekOption(s, _('Days'));
         o.editable = true;
+        o.width = 120;
 
         // description / comment
         o = s.option(form.Value, 'comment', _('Comment'));
         o.placeholder = _('optional note');
         o.editable = true;
-        o.width = '20%';
+        o.width = '18%';
+
+        // On save, record each single-IPv4 rule's MAC so the backend can add
+        // IPv6 rules even while the device is offline at boot. Unknown or
+        // non-host targets clear it (the backend then falls back to leases
+        // and the neighbour table). Runs after the form is parsed, so a
+        // target edited in this save is seen.
+        this.fillMacs = function() {
+            uci.sections('nft-limiter', 'device').forEach(function(dev) {
+                var t = String(dev.target || '').trim();
+                var mac = isIp4(t) ? macByIp4[t] : null;
+                if (mac) {
+                    if (dev.mac !== mac) uci.set('nft-limiter', dev['.name'], 'mac', mac);
+                } else if (dev.mac) {
+                    uci.unset('nft-limiter', dev['.name'], 'mac');
+                }
+            });
+        };
+        this.map = m;
+
+        // Compact layout, re-applied on every Map render (the grid re-renders
+        // the Map when rows are added or removed):
+        //   - the Map description sits on the title line;
+        //   - Global Settings descriptions become "?" hints on their labels;
+        //   - the Per-Device Rules heading gets its "?" hint and the live
+        //     count of devices with loaded rules.
+        var helpHint = function(text) {
+            return E('span', {
+                'class': 'nftl-help', 'title': text,
+                'click': function(ev) { ev.preventDefault(); ev.stopPropagation(); }
+            });
+        };
+        var countSpan = E('span', { 'class': 'nftl-count' });
+        var setCount = function(n) {
+            countSpan.textContent = (n == null) ? '' : _('%d active').format(n);
+        };
+        var decorateMap = function(mapEl) {
+            var h2 = mapEl.querySelector(':scope > h2');
+            if (h2 && !h2.querySelector('.nftl-sub'))
+                h2.appendChild(E('span', { 'class': 'nftl-sub' }, _(
+                    'Per-device bandwidth control via nftables rate limiting. ' +
+                    'Requires OpenWrt 25.12+ with firewall4 / nftables.')));
+
+            mapEl.querySelectorAll('#cbi-nft-limiter-nft-limiter .cbi-value').forEach(function(row) {
+                var d = row.querySelector('.cbi-value-description');
+                var l = row.querySelector('.cbi-value-title');
+                if (!d || !l) return;
+                var text = d.textContent.trim();
+                d.remove();
+                if (text) l.append(' ', helpHint(text));
+            });
+
+            var h3 = mapEl.querySelector('#cbi-nft-limiter-device > h3');
+            if (h3 && !h3.querySelector('.nftl-help'))
+                h3.append(' ', helpHint(deviceHelp), ' ', countSpan);
+        };
+        var origRenderContents = m.renderContents;
+        m.renderContents = function() {
+            return origRenderContents.apply(this, arguments).then(function(el) {
+                decorateMap(this.root);
+                return el;
+            }.bind(this));
+        };
 
         return m.render().then(function(formNode) {
             // Stats tab: live counter table, refreshed every 5s.
@@ -477,9 +653,35 @@ return view.extend({
             // Build the full tree first so the tab wrapper has a parent, then
             // init the tab group (initTabGroup inserts its menu via
             // group.parentNode, which must not be null).
-            var root = E('div', {}, [ nftctl.render(), tabs, buildFooter() ]);
+            // Make the grid's inputs and dropdowns fill their cells instead of
+            // the theme's fixed widths (which truncated times and left gaps).
+            var gridCss = E('style', {}, [
+                '#cbi-nft-limiter-device .cbi-input-text,' +
+                '#cbi-nft-limiter-device .cbi-dropdown' +
+                '{width:100%;min-width:0;max-width:none;box-sizing:border-box}' +
+                // Same icon and colour as the theme's own description "?"
+                // (bootstrap's .cbi-value-description::before), with a blue
+                // fallback for themes that don't define --primary-color-high.
+                '.nftl-help{--nftl-icon:url("data:image/svg+xml,%3Csvg xmlns=\'http://www.w3.org/2000/svg\' width=\'20\' height=\'20\'%3E%3Cpath d=\'M10 0A10 10 0 000 10a10 10 0 0010 10 10 10 0 0010-10A10 10 0 0010 0zm1 17H9v-2h2v2zm2.1-7.7l-.9.9c-.8.7-1.2 1.3-1.2 2.8H9v-.5c0-1.1.4-2.1 1.2-2.8l1.2-1.3c.4-.3.6-.8.6-1.4a2 2 0 00-2-2 2 2 0 00-2 2H6a4 4 0 014-4 4 4 0 014 4c0 .9-.4 1.7-.9 2.3z\'/%3E%3C/svg%3E");' +
+                'display:inline-block;width:1em;height:1em;font-size:14px;cursor:help;' +
+                'vertical-align:middle;margin-left:.25em;' +
+                'background:var(--primary-color-high,#0069d6);' +
+                'mask-image:var(--nftl-icon);mask-size:cover;' +
+                '-webkit-mask-image:var(--nftl-icon);-webkit-mask-size:cover}' +
+                '.nftl-count,.nftl-sub{font-size:13px;font-weight:normal;color:#888;' +
+                'margin-left:.6em;vertical-align:middle}'
+            ]);
+            // The status poll also refreshes the device count on the heading.
+            var status = nftctl.render(function(enabled, out) {
+                setCount(enabled && out != null ? nftctl.countDevices(out) : null);
+            });
+            var root = E('div', {}, [ gridCss, status, tabs, buildFooter() ]);
             ui.tabs.initTabGroup(tabs.childNodes);
             return root;
         });
+    },
+
+    handleSave: function(ev) {
+        return this.map.save(this.fillMacs);
     }
 });

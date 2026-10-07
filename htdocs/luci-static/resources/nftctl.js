@@ -37,36 +37,58 @@ return baseclass.extend({
         });
     },
 
-    refresh: function(box) {
-        var self = this;
-        return this.probe().then(function(out) { self.fill(box, out); });
+    // Resolve to true if the service is enabled (boot symlink present), via the
+    // init script's `enabled` verb. This is the master on/off that Enable/Disable
+    // toggle — independent of whether the nft chain happens to be loaded — and it
+    // doesn't disturb the shared UCI cache (the Settings form's unsaved changes).
+    isEnabled: function() {
+        return fs.exec(INIT, ['enabled'])
+            .then(function(res) { return !!res && res.code === 0; })
+            .catch(function() { return false; });
     },
 
-    // (Re)render the inner content of the status box for one pass. `out` is the
-    // raw nft chain output (null when the chain is not loaded).
-    fill: function(box, out) {
-        var self = this;
-        var loaded   = (out !== null);
-        var stateTxt = loaded ? _('Running') : _('Stopped');
-        var color    = loaded ? '#4CAF50' : '#f44336';
+    // Number of devices with rules in the loaded chain (dev_<n>_* comments).
+    countDevices: function(out) {
+        if (out == null) return 0;
+        var seen = {}, m, re = /"comment":\s*"dev_(\d+)_/g;
+        while ((m = re.exec(out)) !== null) seen[m[1]] = true;
+        return Object.keys(seen).length;
+    },
 
-        // Summarise active rules from the chain comments (dev_<n>_*, default_*).
+    refresh: function(box) {
+        var self = this;
+        return Promise.all([ this.isEnabled(), this.probe() ])
+            .then(function(res) {
+                self.fill(box, res[0], res[1]);
+                if (typeof(self.onUpdate) == 'function')
+                    self.onUpdate(res[0], res[1]);
+            });
+    },
+
+    // (Re)render the inner content of the status box for one pass.
+    //   enabled : master on/off -> Running/Stopped
+    //   out     : raw nft chain output (null if not loaded) -> rule-count detail
+    fill: function(box, enabled, out) {
+        var self = this;
+        var stateTxt = enabled ? _('Running') : _('Stopped');
+        var color    = enabled ? '#4CAF50' : '#f44336';
+
+        // Problems and the global limit only, shown when the service is
+        // enabled. The device count is shown on the Per-Device Rules heading.
         var detail = null;
-        if (loaded) {
-            var seen = {}, m, re = /"comment":\s*"dev_(\d+)_/g;
-            while ((m = re.exec(out)) !== null) seen[m[1]] = true;
-            var n = Object.keys(seen).length;
-            var parts = [];
-            if (n > 0)
-                parts.push(n + ' ' + _('device rule(s)'));
-            if (/"comment":\s*"default_(dl|ul)"/.test(out))
-                parts.push(_('global default limit active'));
-            detail = parts.length ? parts.join(', ') : _('no rules loaded');
+        if (enabled) {
+            if (out === null)
+                detail = _('no rules loaded');
+            else if (/"comment":\s*"default_(dl|ul)"/.test(out))
+                detail = _('global default limit active');
         }
 
-        var btn = function(label, cls, cmd) {
+        // Grey out the button that would not change anything: Enable while
+        // running, Disable and Restart while stopped.
+        var btn = function(label, cls, cmd, disabled) {
             return E('button', {
                 'class': 'cbi-button ' + cls,
+                'disabled': disabled ? '' : null,
                 'click': ui.createHandlerFn(self, 'runAction', box, cmd)
             }, label);
         };
@@ -79,19 +101,20 @@ return baseclass.extend({
             ]),
             detail ? E('div', { 'style': 'color:#666;margin-top:.2em' }, detail) : '',
             E('div', { 'style': 'margin-top:.6em' }, [
-                btn(_('Enable'),  'cbi-button-apply',    'on'),     ' ',
-                btn(_('Disable'), 'cbi-button-negative', 'off'),    ' ',
-                btn(_('Restart'), 'cbi-button-action',   'reapply')
+                btn(_('Enable'),  'cbi-button-apply',    'on',      enabled),  ' ',
+                btn(_('Disable'), 'cbi-button-negative', 'off',     !enabled), ' ',
+                btn(_('Restart'), 'cbi-button-action',   'reapply', !enabled)
             ])
         ]);
     },
 
     // Build the always-visible status section. Self-loads the real state and
-    // polls every 5s.
-    render: function() {
+    // polls every 5s. onUpdate(enabled, out), if given, runs after each poll.
+    render: function(onUpdate) {
         var self = this;
+        self.onUpdate = onUpdate;
         var box = E('div', { 'style': 'margin:.25em 0 1em' });
-        self.fill(box, null);
+        self.fill(box, false, null);
         self.refresh(box);
         poll.add(function() { return self.refresh(box); }, 5);
         return E('div', { 'class': 'cbi-section' }, [

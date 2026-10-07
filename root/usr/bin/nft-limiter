@@ -5,12 +5,25 @@
 #   Range : 192.168.1.1-192.168.1.200  -> ip daddr/saddr (nftables native)
 #   CIDR  : 192.168.1.0/24             -> ip daddr/saddr
 #   IP    : 192.168.1.50               -> ip daddr/saddr
+#   IPv6  : 2001:db8::5, 2001:db8::/64 -> ip6 daddr/saddr
+#
+# IPv6 coverage for IPv4 hosts: a single-IPv4 target whose MAC is known
+# (UCI 'mac', a static DHCP host, the DHCP lease file, or the neighbour
+# table) also gets IPv6 rules. Upload matches the MAC; download matches a
+# dynamic set of the device's global IPv6 addresses, learned from its own
+# outgoing packets (so SLAAC/privacy address changes are followed). The
+# IPv4 and IPv6 rules share one named limit, so the device's total rate
+# is capped, not each family separately. Ranges and subnets are IPv4-only.
+#
+# Block: a device with 'block 1' gets plain drop rules (both directions,
+# both families) instead of a rate limit, within its schedule if one is set.
 #
 # Interface scoping: rules match only on user-selected WAN/VPN interfaces
 # (meta iifname for download, meta oifname for upload), so LAN-to-LAN
 # traffic is never rate-limited.
 #
 # Commands: start | stop | add <idx> | del <idx> | status
+#   (add/del rebuild the whole chain; kept for compatibility)
 
 . /lib/functions.sh
 
@@ -18,6 +31,7 @@ NAME="nft-limiter"
 NFT_TABLE="fw4"
 NFT_CHAIN="custom_qos_enforce"
 NFT_FILE="/var/run/nft-limiter.nft"
+OBJ_PREFIX="nftlim_"
 
 _iface_set=""
 
@@ -56,6 +70,35 @@ _ip4_to_int() {
         [ "$o" -le 255 ] || return 1
     done
     echo "$(( (a << 24) + (b << 16) + (c << 8) + d ))"
+}
+
+# -----------------------------------------------------------------------
+# _mbit_to_kb <mbit> -- Mbit/s to whole kbytes/s for nft. A positive rate
+#   that would round to 0 becomes 1, since 0 means "no limit" here.
+# -----------------------------------------------------------------------
+_mbit_to_kb() {
+    awk -v v="${1:-0}" 'BEGIN { k = v * 125; if (v > 0 && k < 1) k = 1; printf "%.0f", k }'
+}
+
+# -----------------------------------------------------------------------
+# _resolve_mac <ipv4> <uci_mac> -- echo the device's MAC (lowercase), or
+#   nothing. Order: the rule's own 'mac' option (set by LuCI on save), a
+#   static DHCP host, the dnsmasq lease file, the kernel neighbour table.
+# -----------------------------------------------------------------------
+_resolve_mac() {
+    local ip="$1" mac="$2" sec
+    if [ -z "$mac" ]; then
+        sec=$(uci -q show dhcp | sed -n "s/^dhcp\.\([^.]*\)\.ip='${ip}'$/\1/p" | head -n1)
+        [ -n "$sec" ] && mac=$(uci -q get "dhcp.${sec}.mac" | awk '{print $1}')
+    fi
+    [ -z "$mac" ] && [ -r /tmp/dhcp.leases ] && \
+        mac=$(awk -v ip="$ip" '$3 == ip { print $2; exit }' /tmp/dhcp.leases)
+    [ -z "$mac" ] && \
+        mac=$(ip -4 neigh show "$ip" 2>/dev/null | awk '{ for (i = 1; i < NF; i++) if ($i == "lladdr") { print $(i+1); exit } }')
+    mac=$(echo "$mac" | tr 'A-F' 'a-f')
+    case "$mac" in
+        [0-9a-f][0-9a-f]:[0-9a-f][0-9a-f]:[0-9a-f][0-9a-f]:[0-9a-f][0-9a-f]:[0-9a-f][0-9a-f]:[0-9a-f][0-9a-f]) echo "$mac" ;;
+    esac
 }
 
 # -----------------------------------------------------------------------
@@ -107,31 +150,61 @@ check_firewall_hook() {
 }
 
 # -----------------------------------------------------------------------
-# _rule_lines <idx> <target> <dl_kb> <ul_kb> <time_expr> <day_expr>
-#   Outputs nftables rule lines (8-space indent) to stdout.
+# _dir_lines <tag> <match> <prefix> <kb> <block> <limit_name>
+#   One direction of one device: a drop rule (block), or a limit-over-drop
+#   rule plus the terminal pass-through accept. Comment dev_<tag>[_pass].
+# -----------------------------------------------------------------------
+_dir_lines() {
+    local tag="$1" match="$2" prefix="$3" kb="$4" block="$5" lname="$6"
+    if [ "$block" = "1" ]; then
+        printf '        %s %scounter drop comment "dev_%s"\n' "$match" "$prefix" "$tag"
+        return
+    fi
+    if [ "$kb" -gt 0 ] 2>/dev/null; then
+        # counter after the limit, so it counts only what is dropped.
+        printf '        %s %slimit name "%s" counter drop comment "dev_%s"\n' \
+            "$match" "$prefix" "$lname" "$tag"
+    fi
+    printf '        %s %scounter accept comment "dev_%s_pass"\n' "$match" "$prefix" "$tag"
+}
+
+# -----------------------------------------------------------------------
+# _rule_lines <idx> <target> <dl_kb> <ul_kb> <block> <mac> <time_expr> <day_expr>
+#   Outputs nftables rule lines (8-space indent) to stdout. Named limit
+#   objects go to $_obj_file and IPv6 address-learning rules to
+#   $_learn_file (both emitted ahead of the device rules by build_chain).
 #   Uses global $_iface_set for interface scoping.
 # -----------------------------------------------------------------------
 _rule_lines() {
-    local idx="$1" target="$2" dl_kb="$3" ul_kb="$4" time_expr="$5" day_expr="$6"
-    local prefix=""
+    local idx="$1" target="$2" dl_kb="$3" ul_kb="$4" block="$5" mac="$6"
+    local time_expr="$7" day_expr="$8"
+    local prefix="" fam="ip" kb
     [ -n "$time_expr" ] && prefix="${time_expr} "
     [ -n "$day_expr"  ] && prefix="${prefix}${day_expr} "
+    case "$target" in *:*) fam="ip6" ;; esac
 
-    local dl_match="meta iifname { ${_iface_set} } ip daddr $target"
-    local ul_match="meta oifname { ${_iface_set} } ip saddr $target"
+    if [ "$block" != "1" ]; then
+        for kb in "dl $dl_kb" "ul $ul_kb"; do
+            set -- $kb
+            [ "$2" -gt 0 ] 2>/dev/null && \
+                printf '    limit %s%s_%s { rate over %s kbytes/second burst %s kbytes }\n' \
+                    "$OBJ_PREFIX" "$idx" "$1" "$2" "$(( $2 * 2 ))" >> "$_obj_file"
+        done
+    fi
 
-    if [ "$dl_kb" -gt 0 ] 2>/dev/null; then
-        local dl_burst=$((dl_kb * 2))
-        printf '        %s %scounter limit rate over %s kbytes/second burst %s kbytes drop comment "dev_%s_dl"\n' \
-            "$dl_match" "$prefix" "$dl_kb" "$dl_burst" "$idx"
-    fi
-    printf '        %s %scounter accept comment "dev_%s_dl_pass"\n' "$dl_match" "$prefix" "$idx"
-    if [ "$ul_kb" -gt 0 ] 2>/dev/null; then
-        local ul_burst=$((ul_kb * 2))
-        printf '        %s %scounter limit rate over %s kbytes/second burst %s kbytes drop comment "dev_%s_ul"\n' \
-            "$ul_match" "$prefix" "$ul_kb" "$ul_burst" "$idx"
-    fi
-    printf '        %s %scounter accept comment "dev_%s_ul_pass"\n' "$ul_match" "$prefix" "$idx"
+    local in_if="meta iifname { ${_iface_set} }" out_if="meta oifname { ${_iface_set} }"
+    _dir_lines "${idx}_dl" "$in_if $fam daddr $target" "$prefix" "$dl_kb" "$block" "${OBJ_PREFIX}${idx}_dl"
+    _dir_lines "${idx}_ul" "$out_if $fam saddr $target" "$prefix" "$ul_kb" "$block" "${OBJ_PREFIX}${idx}_ul"
+
+    [ -n "$mac" ] || return 0
+    local set="${OBJ_PREFIX}v6_$(echo "$mac" | tr -d ':')"
+    local mac6="ether saddr $mac meta nfproto ipv6"
+    printf '    set %s { type ipv6_addr; flags dynamic, timeout; timeout 1h; size 64; }\n' \
+        "$set" >> "$_obj_file"
+    printf '        %s %s ip6 saddr != fe80::/10 update @%s { ip6 saddr } comment "dev_%s_learn6"\n' \
+        "$out_if" "$mac6" "$set" "$idx" >> "$_learn_file"
+    _dir_lines "${idx}_dl6" "$in_if ip6 daddr @$set" "$prefix" "$dl_kb" "$block" "${OBJ_PREFIX}${idx}_dl"
+    _dir_lines "${idx}_ul6" "$out_if $mac6" "$prefix" "$ul_kb" "$block" "${OBJ_PREFIX}${idx}_ul"
 }
 
 # -----------------------------------------------------------------------
@@ -149,12 +222,12 @@ _catch_all_lines() {
 
     if [ "$dl_kb" -gt 0 ] 2>/dev/null; then
         local dl_burst=$((dl_kb * 2))
-        printf '        meta iifname { %s } %scounter limit rate over %s kbytes/second burst %s kbytes drop comment "default_dl"\n' \
+        printf '        meta iifname { %s } %slimit rate over %s kbytes/second burst %s kbytes counter drop comment "default_dl"\n' \
             "$_iface_set" "$prefix" "$dl_kb" "$dl_burst"
     fi
     if [ "$ul_kb" -gt 0 ] 2>/dev/null; then
         local ul_burst=$((ul_kb * 2))
-        printf '        meta oifname { %s } %scounter limit rate over %s kbytes/second burst %s kbytes drop comment "default_ul"\n' \
+        printf '        meta oifname { %s } %slimit rate over %s kbytes/second burst %s kbytes counter drop comment "default_ul"\n' \
             "$_iface_set" "$prefix" "$ul_kb" "$ul_burst"
     fi
 }
@@ -185,21 +258,32 @@ _time_and_day_expr() {
 }
 
 # -----------------------------------------------------------------------
-# _collect_dev <cfg>  -- config_foreach callback; records "<addr_count> <idx>"
-#   for each enabled device with a target into $_order_list. $_cfg_idx is
-#   advanced for every device section (incl. disabled) so the recorded index
-#   matches the UCI @device[idx] position (and the dev_<idx> rule comment).
+# _collect_dev <cfg>  -- config_foreach callback; records
+#   "<addr_count> <always> <idx>" for each enabled device with a target into
+#   $_order_list. <always> is 0 for a rule with a time window or days and 1
+#   for one without: at equal specificity the scheduled rule must come
+#   first, since an always-on rule's accept is terminal and would shadow it.
+#   Outside its window a scheduled rule doesn't match, so the packet falls
+#   through to the next rule for the same address, then broader ones.
+#   $_cfg_idx is advanced for every device section (incl. disabled) so the
+#   recorded index matches the UCI @device[idx] position (and the
+#   dev_<idx> rule comment).
 # -----------------------------------------------------------------------
 _collect_dev() {
-    local cfg="$1" enable target
+    local cfg="$1" enable target ts te week always=1
     config_get_bool enable "$cfg" enable 1
     if [ "$enable" -eq 0 ]; then
         _cfg_idx=$((_cfg_idx + 1))
         return 0
     fi
     config_get target "$cfg" target
+    config_get ts "$cfg" timestart
+    config_get te "$cfg" timeend
+    config_get week "$cfg" week
+    _time_and_day_expr "$ts" "$te" "$week"
+    [ -n "$_time_expr$_day_expr" ] && always=0
     [ -n "$target" ] && \
-        printf '%s\t%s\n' "$(_target_addr_count "$target")" "$_cfg_idx" >> "$_order_list"
+        printf '%s\t%s\t%s\n' "$(_target_addr_count "$target")" "$always" "$_cfg_idx" >> "$_order_list"
     _cfg_idx=$((_cfg_idx + 1))
 }
 
@@ -209,18 +293,35 @@ _collect_dev() {
 # -----------------------------------------------------------------------
 _emit_device() {
     local idx="$1"
-    local target download upload timestart timeend week dl_kb ul_kb
+    local target download upload block mac timestart timeend week dl_kb ul_kb
     target=$(uci -q get "${NAME}.@device[${idx}].target")
     [ -z "$target" ] && return 0
     download=$(uci  -q get "${NAME}.@device[${idx}].download")
     upload=$(uci    -q get "${NAME}.@device[${idx}].upload")
+    block=$(uci     -q get "${NAME}.@device[${idx}].block")
+    mac=$(uci       -q get "${NAME}.@device[${idx}].mac")
     timestart=$(uci -q get "${NAME}.@device[${idx}].timestart")
     timeend=$(uci   -q get "${NAME}.@device[${idx}].timeend")
     week=$(uci      -q get "${NAME}.@device[${idx}].week")
-    dl_kb=$(awk -v v="${download:-0}" 'BEGIN { printf "%.0f", v * 125 }')
-    ul_kb=$(awk -v v="${upload:-0}"   'BEGIN { printf "%.0f", v * 125 }')
+    dl_kb=$(_mbit_to_kb "$download")
+    ul_kb=$(_mbit_to_kb "$upload")
+    # IPv6 companion rules only for a single IPv4 host with a known MAC.
+    if _ip4_to_int "$target" >/dev/null; then
+        mac=$(_resolve_mac "$target" "$mac")
+    else
+        mac=""
+    fi
     _time_and_day_expr "$timestart" "$timeend" "$week"
-    _rule_lines "$idx" "$target" "$dl_kb" "$ul_kb" "$_time_expr" "$_day_expr"
+    _rule_lines "$idx" "$target" "$dl_kb" "$ul_kb" "${block:-0}" "$mac" "$_time_expr" "$_day_expr"
+}
+
+# -----------------------------------------------------------------------
+# _list_objects <kind> -- echo names of our named objects ("limit" or "set")
+#   currently in the fw4 table.
+# -----------------------------------------------------------------------
+_list_objects() {
+    nft list "${1}s" table inet "$NFT_TABLE" 2>/dev/null \
+        | awk -v k="$1" -v p="$OBJ_PREFIX" '$1 == k && index($2, p) == 1 { print $2 }'
 }
 
 # -----------------------------------------------------------------------
@@ -231,17 +332,14 @@ build_chain() {
     config_load "$NAME"
     _build_iface_set
 
-    {
-        printf 'table inet %s {\n' "$NFT_TABLE"
-        printf '    chain %s {\n' "$NFT_CHAIN"
-        printf '        type filter hook forward priority filter - 5; policy accept;\n'
-        printf '    }\n}\n\n'
-        printf 'flush chain inet %s %s\n\n' "$NFT_TABLE" "$NFT_CHAIN"
-        printf 'table inet %s {\n    chain %s {\n' "$NFT_TABLE" "$NFT_CHAIN"
-    } > "$NFT_FILE"
+    local rules_file="/tmp/nft-limiter-rules.$$" name
+    _obj_file="/tmp/nft-limiter-obj.$$"
+    _learn_file="/tmp/nft-limiter-learn.$$"
+    : > "$rules_file"; : > "$_obj_file"; : > "$_learn_file"
 
     # Emit device rules most-specific-first (smallest address count) so a
-    # per-host rule wins over a broader subnet/range that contains it. The
+    # per-host rule wins over a broader subnet/range that contains it, and
+    # scheduled before always-on at equal specificity (see _collect_dev). The
     # dev_<idx> comment keeps the original UCI section index so the Status
     # view's index mapping stays correct.
     _order_list="/tmp/nft-limiter-order.$$"
@@ -249,9 +347,9 @@ build_chain() {
     _cfg_idx=0
     config_foreach _collect_dev device
     if [ -s "$_order_list" ]; then
-        sort -k1,1n -k2,2n "$_order_list" | while read -r _cnt _didx; do
+        sort -k1,1n -k2,2n -k3,3n "$_order_list" | while read -r _cnt _always _didx; do
             _emit_device "$_didx"
-        done >> "$NFT_FILE"
+        done >> "$rules_file"
     fi
     rm -f "$_order_list"
 
@@ -259,8 +357,8 @@ build_chain() {
     def_glimit=$(uci -q get "${NAME}.@${NAME}[0].glimit")
     def_dl=$(uci -q get "${NAME}.@${NAME}[0].download")
     def_ul=$(uci -q get "${NAME}.@${NAME}[0].upload")
-    def_dl_kb=$(awk -v v="${def_dl:-0}" 'BEGIN { printf "%.0f", v * 125 }')
-    def_ul_kb=$(awk -v v="${def_ul:-0}" 'BEGIN { printf "%.0f", v * 125 }')
+    def_dl_kb=$(_mbit_to_kb "$def_dl")
+    def_ul_kb=$(_mbit_to_kb "$def_ul")
     # Absent flag is treated as enabled so upgrades keep existing global limits.
     [ "${def_glimit:-1}" = "1" ] || { def_dl_kb=0; def_ul_kb=0; }
     def_sched=$(uci -q get "${NAME}.@${NAME}[0].gschedule")
@@ -270,91 +368,31 @@ build_chain() {
     # Absent flag is treated as enabled so upgrades keep an existing schedule.
     [ "${def_sched:-1}" = "1" ] || { def_ts="00:00"; def_te="00:00"; def_week="0"; }
     _time_and_day_expr "$def_ts" "$def_te" "$def_week"
-    _catch_all_lines "$def_dl_kb" "$def_ul_kb" "$_time_expr" "$_day_expr" >> "$NFT_FILE"
+    _catch_all_lines "$def_dl_kb" "$def_ul_kb" "$_time_expr" "$_day_expr" >> "$rules_file"
 
-    printf '    }\n}\n' >> "$NFT_FILE"
-    nft -f "$NFT_FILE"
-}
-
-# -----------------------------------------------------------------------
-# del_device_rules <idx> -- remove rules for device <idx> by nft handle
-# -----------------------------------------------------------------------
-del_device_rules() {
-    local idx="$1" handle tag
-    for tag in dl dl_pass ul ul_pass; do
-        handle=$(nft -a list chain inet "${NFT_TABLE}" "${NFT_CHAIN}" 2>/dev/null \
-            | grep "comment \"dev_${idx}_${tag}\"" \
-            | grep -o 'handle [0-9]*' | awk '{print $2}')
-        [ -n "$handle" ] && \
-            nft delete rule inet "${NFT_TABLE}" "${NFT_CHAIN}" handle "$handle" 2>/dev/null
-    done
-}
-
-# -----------------------------------------------------------------------
-# add_device_rules <idx> -- read UCI for device <idx>, append its rules
-# -----------------------------------------------------------------------
-add_device_rules() {
-    local idx="$1"
-    del_device_rules "$idx"
-    _build_iface_set
-
-    local enable target download upload timestart timeend week
-    enable=$(uci -q get "${NAME}.@device[${idx}].enable")
-    [ "$enable" != "1" ] && return 0
-
-    target=$(uci -q get "${NAME}.@device[${idx}].target")
-    [ -z "$target" ] && return 0
-
-    download=$(uci -q get "${NAME}.@device[${idx}].download" || echo "0")
-    upload=$(uci    -q get "${NAME}.@device[${idx}].upload"  || echo "0")
-    timestart=$(uci -q get "${NAME}.@device[${idx}].timestart")
-    timeend=$(uci   -q get "${NAME}.@device[${idx}].timeend")
-    week=$(uci      -q get "${NAME}.@device[${idx}].week")
-
-    local dl_kb ul_kb
-    dl_kb=$(awk -v v="${download:-0}" 'BEGIN { printf "%.0f", v * 125 }')
-    ul_kb=$(awk -v v="${upload:-0}"   'BEGIN { printf "%.0f", v * 125 }')
-
-    _time_and_day_expr "$timestart" "$timeend" "$week"
-
-    local handle ctag
-    for ctag in default_dl default_ul; do
-        handle=$(nft -a list chain inet "${NFT_TABLE}" "${NFT_CHAIN}" 2>/dev/null \
-            | grep "comment \"${ctag}\"" \
-            | grep -o 'handle [0-9]*' | awk '{print $2}')
-        [ -n "$handle" ] && \
-            nft delete rule inet "${NFT_TABLE}" "${NFT_CHAIN}" handle "$handle" 2>/dev/null
-    done
-
-    # Preserve this device's expr before _time_and_day_expr is reused below.
-    local dev_time_expr="$_time_expr" dev_day_expr="$_day_expr"
-
-    local def_glimit def_sched def_dl def_ul def_dl_kb def_ul_kb def_ts def_te def_week
-    def_glimit=$(uci -q get "${NAME}.@${NAME}[0].glimit")
-    def_dl=$(uci -q get "${NAME}.@${NAME}[0].download")
-    def_ul=$(uci -q get "${NAME}.@${NAME}[0].upload")
-    def_dl_kb=$(awk -v v="${def_dl:-0}" 'BEGIN { printf "%.0f", v * 125 }')
-    def_ul_kb=$(awk -v v="${def_ul:-0}" 'BEGIN { printf "%.0f", v * 125 }')
-    # Absent flag is treated as enabled so upgrades keep existing global limits.
-    [ "${def_glimit:-1}" = "1" ] || { def_dl_kb=0; def_ul_kb=0; }
-    def_sched=$(uci -q get "${NAME}.@${NAME}[0].gschedule")
-    def_ts=$(uci   -q get "${NAME}.@${NAME}[0].timestart")
-    def_te=$(uci   -q get "${NAME}.@${NAME}[0].timeend")
-    def_week=$(uci -q get "${NAME}.@${NAME}[0].week")
-    # Absent flag is treated as enabled so upgrades keep an existing schedule.
-    [ "${def_sched:-1}" = "1" ] || { def_ts="00:00"; def_te="00:00"; def_week="0"; }
-    _time_and_day_expr "$def_ts" "$def_te" "$def_week"
-    local def_time_expr="$_time_expr" def_day_expr="$_day_expr"
-
-    local tmp="/tmp/nft-limiter_dev${idx}.nft"
+    # One transaction: ensure the chain, flush it, drop our old limit objects
+    # (rates may have changed; nothing references them once flushed), then
+    # declare objects and rules. IPv6 sets are kept so learned addresses
+    # survive a rebuild; redeclaring an identical set is a no-op. Learning
+    # rules go first so they see every packet before any terminal verdict.
     {
-        printf 'table inet %s {\n    chain %s {\n' "$NFT_TABLE" "$NFT_CHAIN"
-        _rule_lines "$idx" "$target" "$dl_kb" "$ul_kb" "$dev_time_expr" "$dev_day_expr"
-        _catch_all_lines "$def_dl_kb" "$def_ul_kb" "$def_time_expr" "$def_day_expr"
+        printf 'table inet %s {\n' "$NFT_TABLE"
+        printf '    chain %s {\n' "$NFT_CHAIN"
+        printf '        type filter hook forward priority filter - 5; policy accept;\n'
+        printf '    }\n}\n\n'
+        printf 'flush chain inet %s %s\n\n' "$NFT_TABLE" "$NFT_CHAIN"
+        for name in $(_list_objects limit); do
+            printf 'delete limit inet %s %s\n' "$NFT_TABLE" "$name"
+        done
+        printf 'table inet %s {\n' "$NFT_TABLE"
+        sort -u "$_obj_file"
+        printf '    chain %s {\n' "$NFT_CHAIN"
+        sort -u "$_learn_file"
+        cat "$rules_file"
         printf '    }\n}\n'
-    } > "$tmp"
-    nft -f "$tmp"
-    rm -f "$tmp"
+    } > "$NFT_FILE"
+    rm -f "$rules_file" "$_obj_file" "$_learn_file"
+    nft -f "$NFT_FILE"
 }
 
 # -----------------------------------------------------------------------
@@ -369,7 +407,14 @@ start() {
 }
 
 stop() {
+    local name
     nft delete chain inet "${NFT_TABLE}" "${NFT_CHAIN}" 2>/dev/null
+    for name in $(_list_objects limit); do
+        nft delete limit inet "${NFT_TABLE}" "$name" 2>/dev/null
+    done
+    for name in $(_list_objects set); do
+        nft delete set inet "${NFT_TABLE}" "$name" 2>/dev/null
+    done
     rm -f "$NFT_FILE"
 }
 
@@ -387,8 +432,9 @@ status() {
 case "$1" in
     start)  start ;;
     stop)   stop ;;
-    add)    add_device_rules "$2" ;;
-    del)    del_device_rules "$2" ;;
+    # Per-device add/del used to patch the chain in place, which broke the
+    # specificity order and the shared limit objects. Rebuild instead.
+    add|del) start ;;
     status) status ;;
     *)      start ;;
 esac

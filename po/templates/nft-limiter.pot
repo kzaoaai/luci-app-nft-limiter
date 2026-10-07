@@ -61,9 +61,6 @@ msgstr ""
 msgid "Targets are matched most-specific first: a single IP (or smaller subnet) takes priority over a broader subnet or range that contains it, regardless of row order. Two partially overlapping ranges cannot both apply where they overlap."
 msgstr ""
 
-msgid "On"
-msgstr ""
-
 msgid "Device (IP / Range)"
 msgstr ""
 
@@ -160,9 +157,6 @@ msgstr ""
 msgid "fw4 nft mode"
 msgstr ""
 
-msgid "device rule(s)"
-msgstr ""
-
 msgid "global default limit active"
 msgstr ""
 
@@ -212,4 +206,49 @@ msgid "The QoS chain is not loaded. Use the Enable button above to start the lim
 msgstr ""
 
 msgid "Chain loaded, but no device or global limit rules are active."
+msgstr ""
+
+msgid "Block"
+msgstr ""
+
+msgid "(blocked)"
+msgstr ""
+
+msgid "A single IPv4 device whose MAC is known is also matched on IPv6, sharing the same limit. Subnets and ranges apply to IPv4 only. Block drops the device's WAN traffic instead of limiting it."
+msgstr ""
+
+msgid "Enabled"
+msgstr ""
+
+msgid "Ignored while Block is ticked"
+msgstr ""
+
+msgid "Down"
+msgstr ""
+
+msgid "Up"
+msgstr ""
+
+msgid "Start"
+msgstr ""
+
+msgid "End"
+msgstr ""
+
+msgid "Download limit (Mbit/s)"
+msgstr ""
+
+msgid "Upload limit (Mbit/s)"
+msgstr ""
+
+msgid "Time start (HH:MM)"
+msgstr ""
+
+msgid "Time end (HH:MM)"
+msgstr ""
+
+msgid "%d active"
+msgstr ""
+
+msgid "Whole network"
 msgstr ""

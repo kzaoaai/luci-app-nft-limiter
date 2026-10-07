@@ -14,6 +14,8 @@ Fast, minimal-CPU per-device bandwidth control for OpenWrt using native **nftabl
 - **Native nftables rules** — `limit rate over … drop` policing, near-zero CPU overhead
 - **Selectable Interfaces** — Select interface(s) where traffic is shaped (wan, wan2, VPN, etc...)
 - **Flexible targets** — single IP, CIDR subnet, or arbitrary IP range (`192.168.1.10-192.168.1.50`), with a device picker populating existing devices and hostnames
+- **Block toggle** — drop a device's WAN traffic outright (both directions), optionally on its schedule
+- **IPv6 aware** — a single-IPv4 device with a known MAC is also matched on IPv6 (upload by MAC, download by its learned global addresses), sharing one limit across both families; IPv6 addresses and prefixes work as targets too
 - **Time scheduling** — time-of-day and day-of-week windows, both per-rule and for the global default limit
 - **Live stats** — a Status tab shows per-device accepted/dropped traffic from native nftables counters
 - **Self-healing** — hooks into `firewall4` include so rules survive interface reloads
@@ -54,6 +56,16 @@ config device
     option timeend   22:00
     option week      1,2,5             # Mon-Tue-Fri (0 = every day)
     option comment   'My Laptop'
+    option mac       aa:bb:cc:dd:ee:01 # optional; LuCI fills it on save. Enables IPv6 matching
+                                       # (otherwise looked up in static DHCP, leases, neighbours)
+
+config device
+    option enable    1
+    option target    192.168.1.30
+    option block     1                 # drop all WAN traffic (download/upload ignored)
+    option timestart 00:00
+    option timeend   07:00
+    option comment   'Overnight cutoff'
 
 config device
     option enable    1
