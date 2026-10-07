@@ -3,5 +3,5 @@
 ifaces=$(uci -q get nft-limiter.@nft-limiter[0].iface)
 [ -z "$ifaces" ] && ifaces="wan"
 case " $ifaces " in
-    *" $INTERFACE "*) sleep 5; /etc/init.d/nft-limiter restart ;;
+    *" $INTERFACE "*) sleep 5; /etc/init.d/nft-limiter reapply ;;
 esac

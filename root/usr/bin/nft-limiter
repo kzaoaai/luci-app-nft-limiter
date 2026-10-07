@@ -31,6 +31,11 @@ NAME="nft-limiter"
 NFT_TABLE="fw4"
 NFT_CHAIN="custom_qos_enforce"
 NFT_FILE="/var/run/nft-limiter.nft"
+# Table body (objects + chain) that fw4 loads inside its own ruleset
+# transaction through the table-post symlink below, so a firewall reload
+# never leaves a window without the limiter's rules.
+FW4_BODY="/var/run/nft-limiter.fw4.nft"
+FW4_LINK="/usr/share/nftables.d/table-post/30-nft-limiter.nft"
 # UTC offset at the last build; the ntp hotplug hook rebuilds on a change.
 TZOFF_FILE="/var/run/nft-limiter.tzoff"
 OBJ_PREFIX="nftlim_"
@@ -138,17 +143,22 @@ _target_addr_count() {
 }
 
 # -----------------------------------------------------------------------
-# check_firewall_hook -- inject fw4 include once (idempotent)
-# Ensures QoS rules survive every firewall reload.
+# check_firewall_hook -- make fw4 load our rules with its own (idempotent)
+#   fw4 includes every readable /usr/share/nftables.d/table-post/*.nft
+#   inside its single ruleset transaction and silently skips unreadable
+#   ones, so a symlink to $FW4_BODY (tmpfs, rewritten on every build, absent
+#   while stopped) keeps the rules across firewall reloads with no gap.
+#   Earlier versions used a fw4 "script" include, which ran only after the
+#   reload had already dropped the chain (~1.5 s without rules); remove it.
 # -----------------------------------------------------------------------
 check_firewall_hook() {
-    if ! uci show firewall | grep -q "path='/usr/bin/nft-limiter'"; then
-        uci add firewall include >/dev/null
-        uci set firewall.@include[-1].type='script'
-        uci set firewall.@include[-1].path='/usr/bin/nft-limiter'
-        uci set firewall.@include[-1].fw4_compatible='1'
-        uci commit firewall
-    fi
+    local sec
+    [ -L "$FW4_LINK" ] || { mkdir -p "${FW4_LINK%/*}"; ln -sf "$FW4_BODY" "$FW4_LINK"; }
+    for sec in $(uci -q show firewall | sed -n "s/^firewall\.\([^.]*\)\.path='\/usr\/bin\/nft-limiter'$/\1/p"); do
+        uci -q delete "firewall.${sec}"
+    done
+    uci -q changes firewall | grep -q . && uci commit firewall
+    return 0
 }
 
 # -----------------------------------------------------------------------
@@ -372,29 +382,39 @@ build_chain() {
     _time_and_day_expr "$def_ts" "$def_te" "$def_week"
     _catch_all_lines "$def_dl_kb" "$def_ul_kb" "$_time_expr" "$_day_expr" >> "$rules_file"
 
-    # One transaction: ensure the chain, flush it, drop our old limit objects
-    # (rates may have changed; nothing references them once flushed), then
-    # declare objects and rules. IPv6 sets are kept so learned addresses
-    # survive a rebuild; redeclaring an identical set is a no-op. Learning
-    # rules go first so they see every packet before any terminal verdict.
+    # The table body: objects, then the chain with its hook. Learning rules
+    # go first so they see every packet before any terminal verdict. fw4
+    # loads this same file on a firewall reload (check_firewall_hook).
+    {
+        sort -u "$_obj_file"
+        printf 'chain %s {\n' "$NFT_CHAIN"
+        printf '    type filter hook forward priority filter - 5; policy accept;\n'
+        sort -u "$_learn_file"
+        cat "$rules_file"
+        printf '}\n'
+    } > "${FW4_BODY}.new"
+    rm -f "$rules_file" "$_obj_file" "$_learn_file"
+
+    # Apply it ourselves in one transaction: ensure the chain exists, flush
+    # it, drop our old limit objects (rates may have changed; nothing
+    # references them once flushed), then load the body. The old rules stay
+    # in force until the whole transaction commits, so there is no gap. IPv6
+    # sets are kept so learned addresses survive; redeclaring an identical
+    # set is a no-op.
     {
         printf 'table inet %s {\n' "$NFT_TABLE"
         printf '    chain %s {\n' "$NFT_CHAIN"
         printf '        type filter hook forward priority filter - 5; policy accept;\n'
-        printf '    }\n}\n\n'
-        printf 'flush chain inet %s %s\n\n' "$NFT_TABLE" "$NFT_CHAIN"
+        printf '    }\n}\n'
+        printf 'flush chain inet %s %s\n' "$NFT_TABLE" "$NFT_CHAIN"
         for name in $(_list_objects limit); do
             printf 'delete limit inet %s %s\n' "$NFT_TABLE" "$name"
         done
-        printf 'table inet %s {\n' "$NFT_TABLE"
-        sort -u "$_obj_file"
-        printf '    chain %s {\n' "$NFT_CHAIN"
-        sort -u "$_learn_file"
-        cat "$rules_file"
-        printf '    }\n}\n'
+        printf 'table inet %s {\n    include "%s"\n}\n' "$NFT_TABLE" "${FW4_BODY}.new"
     } > "$NFT_FILE"
-    rm -f "$rules_file" "$_obj_file" "$_learn_file"
-    nft -f "$NFT_FILE" && date +%z > "$TZOFF_FILE"
+    nft -f "$NFT_FILE" || return 1
+    mv "${FW4_BODY}.new" "$FW4_BODY"
+    date +%z > "$TZOFF_FILE"
 }
 
 # -----------------------------------------------------------------------
@@ -417,7 +437,7 @@ stop() {
     for name in $(_list_objects set); do
         nft delete set inet "${NFT_TABLE}" "$name" 2>/dev/null
     done
-    rm -f "$NFT_FILE" "$TZOFF_FILE"
+    rm -f "$NFT_FILE" "$TZOFF_FILE" "$FW4_BODY"
 }
 
 status() {

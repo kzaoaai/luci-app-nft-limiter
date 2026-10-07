@@ -38,9 +38,13 @@ Then open **LuCI → Network → NFT Limiter**.
 ```
 config nft-limiter
     option enabled   1            # master service on/off
-    option iface     'wan'        # interface(s) to rate-limit (space-separated)
+    option iface     'wan'        # interface(s) to rate-limit (space-separated). Include
+                                  # every uplink (failover WAN, VPN tunnels that carry
+                                  # policy-routed traffic): traffic leaving through an
+                                  # unlisted one skips all limits and blocks
     option glimit    1            # enable the global default (catch-all) limit
-    option download  200          # Mbit/s global default (0 = unlimited)
+    option download  200          # Mbit/s, ONE cap shared by all devices without
+                                  # their own rule, not per device (0 = unlimited)
     option upload    100
     option gschedule 0            # restrict the global limit to a window/days
     option timestart 00:00        # global window (only when gschedule = 1)

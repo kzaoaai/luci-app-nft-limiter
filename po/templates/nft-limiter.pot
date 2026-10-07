@@ -25,13 +25,13 @@ msgstr ""
 msgid "Enable Global Default Limit"
 msgstr ""
 
-msgid "Apply a fallback rate limit to all traffic not covered by a per-device rule. When off, only per-device rules apply."
+msgid "Apply one shared limit to all traffic not covered by a per-device rule: a single cap for all of those devices together, not a limit per device. When off, only per-device rules apply."
 msgstr ""
 
 msgid "Global Download Limit (Mbit/s)"
 msgstr ""
 
-msgid "Applies only to devices not covered by a per-device rule. Set to 0 for unlimited."
+msgid "One total shared by all devices without their own rule, not a per-device limit. Set to 0 for unlimited."
 msgstr ""
 
 msgid "Global Upload Limit (Mbit/s)"
@@ -278,4 +278,7 @@ msgid "Global Limit (Mbit/s)"
 msgstr ""
 
 msgid "Global Schedule"
+msgstr ""
+
+msgid "Not rate-limited: %s. Traffic routed out through these uplinks (e.g. failover, or policy-routed VPN) skips every limit and block."
 msgstr ""

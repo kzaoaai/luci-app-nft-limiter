@@ -2,7 +2,7 @@
 	"luci-app-nft-limiter": {
 		"description": "Grant access for luci-app-nft-limiter",
 		"read": {
-			"uci": [ "nft-limiter" ],
+			"uci": [ "nft-limiter", "firewall" ],
 			"file": {
 				"/usr/sbin/nft": [ "exec" ],
 				"/sbin/ip": [ "exec" ]

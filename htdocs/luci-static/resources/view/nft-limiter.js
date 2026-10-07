@@ -301,6 +301,7 @@ return view.extend({
         return Promise.all([
             network.getHostHints(),
             uci.load('nft-limiter'),
+            L.resolveDefault(uci.load('firewall'), null),
             network.getNetworks(),
             L.resolveDefault(fs.exec_direct('/sbin/ip', ['-j', 'neigh', 'show']), null),
             L.resolveDefault(fs.exec_direct('/usr/sbin/nft', nftctl.NFT_ARGS), null)
@@ -309,14 +310,14 @@ return view.extend({
 
     render: function(data) {
         var hints = data[0];
-        var networks = data[2];
+        var networks = data[3];
 
         // Map of IP address -> kernel neighbour (ARP/NDP) state for a
         // simple online/offline dot next to each device in the dropdown.
         var neighState = {};
-        if (data[3]) {
+        if (data[4]) {
             try {
-                JSON.parse(data[3]).forEach(function(n) {
+                JSON.parse(data[4]).forEach(function(n) {
                     if (n.dst && Array.isArray(n.state) && n.state.length)
                         neighState[n.dst] = n.state[0];
                 });
@@ -419,13 +420,38 @@ return view.extend({
             if (name !== 'loopback')
                 o.value(name, name + ' (' + net.getI18n() + ')');
         });
+        // Warn about uplinks that are not selected: interfaces in a
+        // masquerading (NAT) firewall zone, i.e. where LAN traffic can leave
+        // the router. Traffic routed out through one of those (failover, or
+        // policy-routed VPN) skips every limit and block. Overlay networks
+        // with no protocol of their own (e.g. Tailscale) are left out.
+        var protoOf = {};
+        networks.forEach(function(net) { protoOf[net.getName()] = net.getProtocol(); });
+        var natUplinks = [];
+        uci.sections('firewall', 'zone').forEach(function(z) {
+            if (z.masq !== '1') return;
+            L.toArray(z.network).forEach(function(n) {
+                if (protoOf[n] && protoOf[n] !== 'none' && natUplinks.indexOf(n) < 0)
+                    natUplinks.push(n);
+            });
+        });
+        var uplinkWarn = E('div', { 'class': 'nftl-warn' });
+        var updateUplinkWarn = function(selected) {
+            selected = L.toArray(selected);
+            var missing = natUplinks.filter(function(n) { return selected.indexOf(n) < 0; });
+            uplinkWarn.style.display = missing.length ? '' : 'none';
+            uplinkWarn.textContent = missing.length ? _('Not rate-limited: %s. Traffic routed out through these uplinks (e.g. failover, or policy-routed VPN) skips every limit and block.').format(missing.join(', ')) : '';
+        };
+        updateUplinkWarn(uci.get_first('nft-limiter', 'nft-limiter', 'iface') || 'wan');
+        o.onchange = function(ev, section_id, value) { updateUplinkWarn(value); };
 
         // Toggle for the global default (catch-all) limit, backed by a real UCI
         // flag the engine honours. Initial state is inferred from existing limit
         // values so upgrades don't silently drop a configured global limit.
         o = s.option(form.Flag, 'glimit', _('Enable Global Default Limit'),
-            _('Apply a fallback rate limit to all traffic not covered by a ' +
-              'per-device rule. When off, only per-device rules apply.'));
+            _('Apply one shared limit to all traffic not covered by a per-device ' +
+              'rule: a single cap for all of those devices together, not a ' +
+              'limit per device. When off, only per-device rules apply.'));
         o.rmempty = false;
         o.default = '0';
         o.cfgvalue = function(section_id) {
@@ -450,14 +476,14 @@ return view.extend({
         };
 
         o = s.option(form.Value, 'download', _('Global Download Limit (Mbit/s)'),
-            _('Applies only to devices not covered by a per-device rule. Set to 0 for unlimited.'));
+            _('One total shared by all devices without their own rule, not a per-device limit. Set to 0 for unlimited.'));
         o.datatype = 'ufloat';
         o.placeholder = '10';
         o.depends('glimit', '1');
         keepWhenCollapsed(o);
 
         o = s.option(form.Value, 'upload', _('Global Upload Limit (Mbit/s)'),
-            _('Applies only to devices not covered by a per-device rule. Set to 0 for unlimited.'));
+            _('One total shared by all devices without their own rule, not a per-device limit. Set to 0 for unlimited.'));
         o.datatype = 'ufloat';
         o.placeholder = '5';
         o.depends('glimit', '1');
@@ -727,6 +753,10 @@ return view.extend({
             // Coverage dot at the start of each covered row's Device cell:
             // blue = also matched by another rule (details on hover),
             // orange = shadowed, this row can never apply.
+            var ifaceField = mapEl.querySelector('#cbi-nft-limiter-nft-limiter .cbi-value[data-name="iface"] .cbi-value-field');
+            if (ifaceField && uplinkWarn.parentNode !== ifaceField)
+                ifaceField.appendChild(uplinkWarn);
+
             var cover = coverageMap(uci.sections('nft-limiter', 'device'));
             mapEl.querySelectorAll('#cbi-nft-limiter-device tr[data-section-id]').forEach(function(tr) {
                 var cell = tr.querySelector('td[data-name="target"] > div');
@@ -792,7 +822,7 @@ return view.extend({
 
         return m.render().then(function(formNode) {
             // Stats tab: live counter table, refreshed every 5s.
-            var tableBox = E('div', {}, statsTable(parseCounters(data[4])));
+            var tableBox = E('div', {}, statsTable(parseCounters(data[5])));
             poll.add(function() {
                 return L.resolveDefault(fs.exec_direct('/usr/sbin/nft', nftctl.NFT_ARGS), null)
                     .then(function(out) { dom.content(tableBox, statsTable(parseCounters(out))); });
@@ -833,6 +863,9 @@ return view.extend({
                 'background:var(--primary-color-high,#0069d6)}' +
                 '.nftl-cover.nftl-dead{background:#f0ad4e}' +
                 '.cbi-value.nftl-merged{display:none!important}' +
+                '.nftl-warn{margin-top:.4em;padding:.35em .6em;border-radius:4px;max-width:40em;' +
+                'font-size:12px;line-height:1.4;background:rgba(240,173,78,.15);' +
+                'border-left:3px solid #f0ad4e}' +
                 '.nftl-inline{display:flex;flex-wrap:wrap;gap:.4em 1.4em;align-items:center}' +
                 '.nftl-part{display:flex;align-items:center;gap:.45em}' +
                 '.nftl-caption{color:#888;white-space:nowrap}' +

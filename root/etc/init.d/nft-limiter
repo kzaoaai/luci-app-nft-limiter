@@ -15,6 +15,9 @@ NAME=nft-limiter
 #   on     : set the master flag, enable on boot, and load the rules now
 #   off    : clear the master flag, stop the rules, and disable on boot
 #   reapply: rebuild the rules now (no flag change); no-op when disabled
+# Every rebuild is one atomic nft transaction (nft-limiter start), never a
+# stop followed by a start: stopping first would leave blocked devices with
+# internet access for the ~1-2 s the rebuild takes.
 EXTRA_COMMANDS="on off reapply"
 EXTRA_HELP="        on      Enable the limiter (set flag, enable on boot, load rules)
         off     Disable the limiter (clear flag, stop rules, disable on boot)
@@ -36,18 +39,20 @@ off() {
 
 reapply() {
     [ "$(uci -q get "${NAME}.@${NAME}[0].enabled")" = "1" ] || return 0
-    nft-limiter stop
     nft-limiter start
 }
 
 start_service() {
-    nft-limiter stop
+    if [ "$(uci -q get "${NAME}.@${NAME}[0].enabled")" = "1" ]; then
+        nft-limiter start
+    else
+        nft-limiter stop
+    fi
+}
 
-    local enabled
-    enabled=$(uci -q get "${NAME}.@${NAME}[0].enabled")
-    [ "$enabled" = "1" ] || return 0
-
-    nft-limiter start
+# rc.common's restart is stop + start; rebuild atomically instead.
+restart() {
+    start "$@"
 }
 
 service_triggers() {

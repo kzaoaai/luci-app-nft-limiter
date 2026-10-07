@@ -61,6 +61,8 @@ rm -f "/tmp/$FILE_NAME"
 
 /etc/init.d/rpcd restart
 /etc/init.d/nft-limiter enable
-/etc/init.d/firewall restart
+# Rebuild the rules in place (one atomic transaction). A firewall restart
+# would drop every rule, the limiter's included, while it reloads.
+/etc/init.d/nft-limiter reapply
 
 echo "Done! Open LuCI -> Network -> NFT Limiter to configure rules."
