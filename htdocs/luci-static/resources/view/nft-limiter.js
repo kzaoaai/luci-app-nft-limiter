@@ -742,6 +742,42 @@ return view.extend({
                 }), cell.firstChild);
             });
 
+            // Global limit and schedule fields share a row each: the other
+            // fields' widgets move into the first field's row under short
+            // captions. LuCI finds widgets by id and checks dependencies on
+            // the original rows, which stay in the DOM (hidden), so saving,
+            // validation and show/hide keep working.
+            var mergeRow = function(label, parts) {
+                var rows = parts.map(function(p) {
+                    return mapEl.querySelector('#cbi-nft-limiter-nft-limiter .cbi-value[data-name="' + p[0] + '"]');
+                });
+                if (rows.some(function(r) { return !r; })) return;
+                var field = rows[0].querySelector('.cbi-value-field');
+                var title = rows[0].querySelector('.cbi-value-title');
+                if (!field || field.classList.contains('nftl-inline')) return;
+                var group = E('div', { 'class': 'nftl-inline' });
+                var mainHelp = title && title.querySelector('.nftl-help');
+                rows.forEach(function(row, i) {
+                    var f = row.querySelector('.cbi-value-field');
+                    var widget = E('div', {}, Array.prototype.slice.call(f.childNodes));
+                    var caption = E('span', { 'class': 'nftl-caption' }, parts[i][1]);
+                    // Keep a merged field's own "?" hint when it says
+                    // something the row's main hint doesn't.
+                    var help = (i > 0) && row.querySelector('.cbi-value-title .nftl-help');
+                    if (help && (!mainHelp || help.title !== mainHelp.title))
+                        caption.append(' ', help);
+                    group.appendChild(E('div', { 'class': 'nftl-part' }, [ caption, widget ]));
+                    if (i > 0) row.classList.add('nftl-merged');
+                });
+                field.appendChild(group);
+                if (title && title.firstChild && title.firstChild.nodeType === 3)
+                    title.firstChild.nodeValue = label;
+            };
+            mergeRow(_('Global Limit (Mbit/s)'), [
+                [ 'download', _('Down') ], [ 'upload', _('Up') ] ]);
+            mergeRow(_('Global Schedule'), [
+                [ 'timestart', _('Start') ], [ 'timeend', _('End') ], [ 'week', _('Days') ] ]);
+
             var h3 = mapEl.querySelector('#cbi-nft-limiter-device > h3');
             if (h3 && !h3.querySelector('.nftl-help'))
                 h3.append(' ', helpHint(deviceHelp), ' ', countSpan);
@@ -796,6 +832,12 @@ return view.extend({
                 '.nftl-cover{flex:none;width:9px;height:9px;border-radius:50%;cursor:help;' +
                 'background:var(--primary-color-high,#0069d6)}' +
                 '.nftl-cover.nftl-dead{background:#f0ad4e}' +
+                '.cbi-value.nftl-merged{display:none!important}' +
+                '.nftl-inline{display:flex;flex-wrap:wrap;gap:.4em 1.4em;align-items:center}' +
+                '.nftl-part{display:flex;align-items:center;gap:.45em}' +
+                '.nftl-caption{color:#888;white-space:nowrap}' +
+                '.nftl-part .cbi-input-text{width:7em;min-width:0}' +
+                '.nftl-part .cbi-dropdown{min-width:10em}' +
                 // Phones only (the same query bootstrap's mobile.css uses for
                 // its stacked-card grid; desktop never matches it):
                 //  - Enabled and Block share the first line, then Device,

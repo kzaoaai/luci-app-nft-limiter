@@ -273,3 +273,9 @@ msgstr ""
 
 msgid "no limit"
 msgstr ""
+
+msgid "Global Limit (Mbit/s)"
+msgstr ""
+
+msgid "Global Schedule"
+msgstr ""
