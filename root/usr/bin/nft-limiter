@@ -31,6 +31,8 @@ NAME="nft-limiter"
 NFT_TABLE="fw4"
 NFT_CHAIN="custom_qos_enforce"
 NFT_FILE="/var/run/nft-limiter.nft"
+# UTC offset at the last build; the ntp hotplug hook rebuilds on a change.
+TZOFF_FILE="/var/run/nft-limiter.tzoff"
 OBJ_PREFIX="nftlim_"
 
 _iface_set=""
@@ -392,7 +394,7 @@ build_chain() {
         printf '    }\n}\n'
     } > "$NFT_FILE"
     rm -f "$rules_file" "$_obj_file" "$_learn_file"
-    nft -f "$NFT_FILE"
+    nft -f "$NFT_FILE" && date +%z > "$TZOFF_FILE"
 }
 
 # -----------------------------------------------------------------------
@@ -415,7 +417,7 @@ stop() {
     for name in $(_list_objects set); do
         nft delete set inet "${NFT_TABLE}" "$name" 2>/dev/null
     done
-    rm -f "$NFT_FILE"
+    rm -f "$NFT_FILE" "$TZOFF_FILE"
 }
 
 status() {

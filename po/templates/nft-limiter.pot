@@ -252,3 +252,24 @@ msgstr ""
 
 msgid "Whole network"
 msgstr ""
+
+msgid "blocked"
+msgstr ""
+
+msgid "Down %s / Up %s Mbit/s"
+msgstr ""
+
+msgid "always"
+msgstr ""
+
+msgid "Rules for these addresses, in checking order (first match wins):"
+msgstr ""
+
+msgid "this row"
+msgstr ""
+
+msgid "never reached"
+msgstr ""
+
+msgid "no limit"
+msgstr ""

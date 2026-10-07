@@ -81,6 +81,92 @@ function intToIp4(n) {
     return [ n >>> 24, (n >>> 16) & 255, (n >>> 8) & 255, n & 255 ].join('.');
 }
 
+// IPv4 address span [lo, hi] of a target (host, CIDR or range), or null
+// for IPv6 / unparseable targets.
+function ip4Span(t) {
+    t = String(t || '').trim();
+    var m;
+    if (isIp4(t)) return [ ip4ToInt(t), ip4ToInt(t) ];
+    if ((m = t.match(/^([\d.]+)\/(\d{1,2})$/)) && isIp4(m[1]) && +m[2] <= 32) {
+        var size = Math.pow(2, 32 - m[2]);
+        var lo = Math.floor(ip4ToInt(m[1]) / size) * size;
+        return [ lo, lo + size - 1 ];
+    }
+    if ((m = t.match(/^([\d.]+)-([\d.]+)$/)) && isIp4(m[1]) && isIp4(m[2]))
+        return [ ip4ToInt(m[1]), ip4ToInt(m[2]) ];
+    return null;
+}
+
+function hasSchedule(dev) {
+    var ts = dev.timestart || '00:00', te = dev.timeend || '00:00';
+    return (ts !== '00:00' || te !== '00:00') || (dev.week && dev.week !== '0');
+}
+
+var DAY_NAMES = { '1': 'Mon', '2': 'Tue', '3': 'Wed', '4': 'Thu', '5': 'Fri', '6': 'Sat', '7': 'Sun' };
+
+function describeRule(dev) {
+    var dl = +(dev.download || 0), ul = +(dev.upload || 0);
+    var what = (dev.block === '1') ? _('blocked')
+        : (!dl && !ul) ? _('no limit')
+        : _('Down %s / Up %s Mbit/s').format(dl || '\u221e', ul || '\u221e');
+    var when = _('always');
+    if (hasSchedule(dev)) {
+        when = (dev.timestart || '00:00') + '\u2013' + (dev.timeend || '00:00');
+        if (dev.week && dev.week !== '0')
+            when += ' ' + dev.week.split(',').map(function(d) { return DAY_NAMES[d] || d; }).join(',');
+    }
+    var name = dev.comment ? (dev.comment + ' (' + dev.target + ')') : dev.target;
+    return name + ': ' + what + ', ' + when;
+}
+
+// For each enabled row that other enabled rows also match (same addresses,
+// or a broader target containing it), the full list of rules for those
+// addresses in the engine's checking order: fewest addresses first, then
+// scheduled before always-on, then list order. The first match wins, and
+// an always-on rule always matches, so everything after it is never reached.
+// Returns { sid: { text, dead } }; dead = this row itself is never reached.
+function coverageMap(devs) {
+    var rows = [];
+    devs.forEach(function(dev, idx) {
+        if (dev.enable === '0' || !dev.target) return;
+        var span = ip4Span(dev.target);
+        rows.push({
+            dev: dev, idx: idx, span: span,
+            v6: span ? null : String(dev.target).trim().toLowerCase(),
+            size: span ? span[1] - span[0] + 1 : Infinity,
+            always: !hasSchedule(dev)
+        });
+    });
+    var order = function(a, b) {
+        if (a.size !== b.size) return a.size - b.size;
+        if (a.always !== b.always) return a.always ? 1 : -1;
+        return a.idx - b.idx;
+    };
+    var out = {};
+    rows.forEach(function(r) {
+        var chain = rows.filter(function(o) {
+            if (o === r) return true;
+            return (r.span && o.span) ? (o.span[0] <= r.span[0] && o.span[1] >= r.span[1])
+                                      : (!!r.v6 && r.v6 === o.v6);
+        }).sort(order);
+        if (chain.length < 2) return;
+        var lines = [ _('Rules for these addresses, in checking order (first match wins):') ];
+        var reached = true, dead = false;
+        chain.forEach(function(o, i) {
+            var line = (i + 1) + '. ' + describeRule(o.dev);
+            if (o === r) line += '  \u2190 ' + _('this row');
+            if (!reached) {
+                line += '  (' + _('never reached') + ')';
+                if (o === r) dead = true;
+            }
+            lines.push(line);
+            if (o.always) reached = false;
+        });
+        out[r.dev['.name']] = { text: lines.join('\n'), dead: dead };
+    });
+    return out;
+}
+
 // Subnets of the router's own LANs/VLANs as dropdown entries: every
 // static-address interface's IPv4 network, e.g. guest -> 192.168.2.0/24.
 // Uplinks (DHCP/PPPoE, or a static one with a default gateway such as a 4G
@@ -593,11 +679,30 @@ return view.extend({
         //   - Global Settings descriptions become "?" hints on their labels;
         //   - the Per-Device Rules heading gets its "?" hint and the live
         //     count of devices with loaded rules.
+        // Hint popup: the "?" hints and coverage dots show their text in a
+        // small popup on click/tap, since touch browsers (iOS Safari) never
+        // show title tooltips. Tapping elsewhere or the same icon closes it.
+        var tip = null;
+        var closeTip = function() { if (tip) { tip.remove(); tip = null; } };
+        document.addEventListener('click', function(ev) {
+            if (tip && !tip.contains(ev.target)) closeTip();
+        });
+        var toggleTip = function(ev) {
+            ev.preventDefault();
+            ev.stopPropagation();
+            var anchor = ev.currentTarget;
+            if (tip && tip.anchor === anchor) { closeTip(); return; }
+            closeTip();
+            tip = E('div', { 'class': 'nftl-tip' }, anchor.getAttribute('title'));
+            tip.anchor = anchor;
+            document.body.appendChild(tip);
+            var r = anchor.getBoundingClientRect();
+            var maxLeft = document.documentElement.clientWidth - tip.offsetWidth - 8;
+            tip.style.left = (window.scrollX + Math.max(8, Math.min(r.left, maxLeft))) + 'px';
+            tip.style.top = (window.scrollY + r.bottom + 6) + 'px';
+        };
         var helpHint = function(text) {
-            return E('span', {
-                'class': 'nftl-help', 'title': text,
-                'click': function(ev) { ev.preventDefault(); ev.stopPropagation(); }
-            });
+            return E('span', { 'class': 'nftl-help', 'title': text, 'click': toggleTip });
         };
         var countSpan = E('span', { 'class': 'nftl-count' });
         var setCount = function(n) {
@@ -617,6 +722,24 @@ return view.extend({
                 var text = d.textContent.trim();
                 d.remove();
                 if (text) l.append(' ', helpHint(text));
+            });
+
+            // Coverage dot at the start of each covered row's Device cell:
+            // blue = also matched by another rule (details on hover),
+            // orange = shadowed, this row can never apply.
+            var cover = coverageMap(uci.sections('nft-limiter', 'device'));
+            mapEl.querySelectorAll('#cbi-nft-limiter-device tr[data-section-id]').forEach(function(tr) {
+                var cell = tr.querySelector('td[data-name="target"] > div');
+                if (!cell) return;
+                var old = cell.querySelector('.nftl-cover');
+                if (old) old.remove();
+                var c = cover[tr.getAttribute('data-section-id')];
+                if (!c) return;
+                cell.insertBefore(E('span', {
+                    'class': 'nftl-cover' + (c.dead ? ' nftl-dead' : ''),
+                    'title': c.text,
+                    'click': toggleTip
+                }), cell.firstChild);
             });
 
             var h3 = mapEl.querySelector('#cbi-nft-limiter-device > h3');
@@ -668,6 +791,40 @@ return view.extend({
                 'background:var(--primary-color-high,#0069d6);' +
                 'mask-image:var(--nftl-icon);mask-size:cover;' +
                 '-webkit-mask-image:var(--nftl-icon);-webkit-mask-size:cover}' +
+                '#cbi-nft-limiter-device td[data-name="target"] > div' +
+                '{display:flex;align-items:center;gap:.35em}' +
+                '.nftl-cover{flex:none;width:9px;height:9px;border-radius:50%;cursor:help;' +
+                'background:var(--primary-color-high,#0069d6)}' +
+                '.nftl-cover.nftl-dead{background:#f0ad4e}' +
+                // Phones only (the same query bootstrap's mobile.css uses for
+                // its stacked-card grid; desktop never matches it):
+                //  - Enabled and Block share the first line, then Device,
+                //    then the row buttons; the other fields are hidden
+                //    (Edit shows them all);
+                //  - the coverage dot sits beside the "Device" label, bigger
+                //    for touch, instead of at the screen edge.
+                '@media screen and (max-device-width:600px){' +
+                '#cbi-nft-limiter-device .td[data-name="download"],' +
+                '#cbi-nft-limiter-device .td[data-name="upload"],' +
+                '#cbi-nft-limiter-device .td[data-name="timestart"],' +
+                '#cbi-nft-limiter-device .td[data-name="timeend"],' +
+                '#cbi-nft-limiter-device .td[data-name="week"],' +
+                '#cbi-nft-limiter-device .td[data-name="comment"]{display:none}' +
+                '#cbi-nft-limiter-device .td[data-name="enable"]{order:1}' +
+                '#cbi-nft-limiter-device .td[data-name="block"]{order:2}' +
+                '#cbi-nft-limiter-device .td[data-name="target"]{order:3;display:flex;' +
+                'flex-wrap:wrap;align-items:center;column-gap:.5em}' +
+                '#cbi-nft-limiter-device .td[data-name="target"]::before{flex:0 1 auto}' +
+                '#cbi-nft-limiter-device .td[data-name="target"] > div{display:contents}' +
+                '#cbi-nft-limiter-device .td[data-name="target"] .cbi-dropdown{flex:1 1 100%}' +
+                '#cbi-nft-limiter-device .td.cbi-section-actions{order:4}' +
+                '.nftl-cover{width:14px;height:14px}' +
+                '}' +
+                '.nftl-tip{position:absolute;z-index:1000;max-width:min(26em,calc(100vw - 16px));' +
+                'padding:.5em .7em;border:1px solid rgba(127,127,127,.4);border-radius:4px;' +
+                'background:var(--background-color-high,#fff);color:var(--text-color-highest,#333);' +
+                'box-shadow:0 2px 8px rgba(0,0,0,.2);font-size:12px;font-weight:normal;' +
+                'line-height:1.45;white-space:pre-line;text-align:left}' +
                 '.nftl-count,.nftl-sub{font-size:13px;font-weight:normal;color:#888;' +
                 'margin-left:.6em;vertical-align:middle}'
             ]);
