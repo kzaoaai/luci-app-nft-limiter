@@ -43,9 +43,9 @@ config nft-limiter
     option enabled   1            # master service on/off
     option period_day 1           # day (1-31) the ISP billing period starts; shorter
                                   # months use their last day
-    option hist_months 13         # advanced: months of daily history kept (default 13)
-    option hist_save  1           # advanced: copy history to flash daily/at shutdown
-    option burst      2           # advanced: burst allowance, in seconds of each limit
+    option hist_months 13         # months of daily history kept (default 13)
+    option hist_save  1           # copy history to flash daily/at shutdown
+    option burst      2           # burst allowance, in seconds of each limit
     option iface     'wan'        # interface(s) to rate-limit (space-separated). Include
                                   # every uplink (failover WAN, VPN tunnels that carry
                                   # policy-routed traffic): traffic leaving through an

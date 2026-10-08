@@ -731,8 +731,8 @@ return view.extend({
             return opt;
         };
 
-        // The Map's description is shown beside its title (decorateMap).
-        m = new form.Map('nft-limiter', _('NFT Limiter'));
+        // No Map title: the page title is in the header (nftctl.render).
+        m = new form.Map('nft-limiter');
 
         // ------------------------------------------------------------------
         // Global settings section
@@ -856,25 +856,19 @@ return view.extend({
               'un-matched traffic is unrestricted. Leave times at 00:00 and days ' +
               'empty to always apply.'))).depends({ glimit: '1', gschedule: '1' });
 
-        // Advanced: off by default, shown with the switch below. The switch
-        // is only a view setting (stored, but not read by the engine).
-        o = s.option(form.Flag, 'show_advanced', _('Advanced Settings'));
-        o.default = '0';
+        // History and burst (on the Settings tab, always shown).
         o = s.option(form.Value, 'hist_months', _('Keep History For (months)'),
             _('How long daily usage totals are kept (detailed history: 7 days; hourly: 45 days). Default 13.'));
         o.datatype = 'range(1,60)';
         o.placeholder = '13';
-        o.depends('show_advanced', '1');
         o = s.option(form.Flag, 'hist_save', _('Save History To Flash'),
             _('Copy the usage history to flash once a day and at shutdown (a few hundred kB at most), so it survives reboots. Off keeps it in RAM only and removes the flash copy.'));
         o.default = '1';
         o.rmempty = false;
-        o.depends('show_advanced', '1');
         o = s.option(form.Value, 'burst', _('Burst (seconds)'),
             _('How much traffic may pass above a limit in a short burst, in seconds of that limit (default 2). Lower is stricter and smoother; higher keeps web browsing snappier.'));
         o.datatype = 'range(0.1,30)';
         o.placeholder = '2';
-        o.depends('show_advanced', '1');
 
         // ------------------------------------------------------------------
         // Per-device rules section
@@ -1145,11 +1139,6 @@ return view.extend({
             countSpan.textContent = (n == null) ? '' : _('%d active').format(n);
         };
         var decorateMap = function(mapEl) {
-            var h2 = mapEl.querySelector(':scope > h2');
-            if (h2 && !h2.querySelector('.nftl-sub'))
-                h2.appendChild(E('span', { 'class': 'nftl-sub' }, _(
-                    'Per-device bandwidth control via nftables rate limiting. ' +
-                    'Requires OpenWrt 25.12+ with firewall4 / nftables.')));
 
             mapEl.querySelectorAll('#cbi-nft-limiter-nft-limiter .cbi-value').forEach(function(row) {
                 var d = row.querySelector('.cbi-value-description');
@@ -1288,21 +1277,31 @@ return view.extend({
                 return Promise.resolve();
             }, 5);
 
-            // Settings / Stats tabs below the always-visible status block.
-            var tabs = E('div', {}, [
-                E('div', { 'class': 'cbi-section', 'data-tab': 'settings', 'data-tab-title': _('Settings') }, [
-                    formNode
-                ]),
-                E('div', { 'class': 'cbi-section', 'data-tab': 'stats', 'data-tab-title': _('Stats') }, [
-                    E('h3', {}, _('Traffic Statistics')),
-                    rangeBar,
-                    liveNote,
-                    tableBox
-                ])
+            // Rules / Stats / Settings tabs. Both form sections stay inside the
+            // one Map (so Save & Apply and dependency checks see them all);
+            // the page shows one at a time by CSS, keyed on data-tab, which
+            // also survives the Map re-rendering itself.
+            var page = E('div', { 'class': 'nftl-page' });
+            var statsWrap = E('div', { 'class': 'cbi-section nftl-statswrap' }, [
+                E('h3', {}, _('Traffic Statistics')),
+                rangeBar,
+                liveNote,
+                tableBox
             ]);
-            // Build the full tree first so the tab wrapper has a parent, then
-            // init the tab group (initTabGroup inserts its menu via
-            // group.parentNode, which must not be null).
+            var tabNames = [ [ 'rules', _('Rules') ], [ 'stats', _('Stats') ], [ 'settings', _('Settings') ] ];
+            var tabMenu = E('ul', { 'class': 'cbi-tabmenu' });
+            var showTab = function(t) {
+                page.setAttribute('data-tab', t);
+                try { localStorage.setItem('nftl-tab', t); } catch (e) {}
+                dom.content(tabMenu, tabNames.map(function(n) {
+                    return E('li', { 'class': n[0] === t ? 'cbi-tab' : 'cbi-tab-disabled' },
+                        E('a', { 'href': '#', 'click': function(ev) { ev.preventDefault(); showTab(n[0]); } }, n[1]));
+                }));
+            };
+            var startTab = 'rules';
+            try { startTab = localStorage.getItem('nftl-tab') || 'rules'; } catch (e) {}
+            dom.content(page, [ tabMenu, E('div', { 'class': 'nftl-formwrap' }, formNode), statsWrap ]);
+            showTab(startTab);
             // Make the grid's inputs and dropdowns fill their cells instead of
             // the theme's fixed widths (which truncated times and left gaps).
             var gridCss = E('style', {}, [
@@ -1341,6 +1340,12 @@ return view.extend({
                 '#cbi-nft-limiter-device tr.nftl-related,#cbi-nft-limiter-device tr.nftl-self' +
                 '{outline:1px solid rgba(0,105,214,.45);outline-offset:-1px}' +
                 '.cbi-value.nftl-merged{display:none!important}' +
+                '.nftl-page[data-tab="rules"] #cbi-nft-limiter-nft-limiter,' +
+                '.nftl-page[data-tab="settings"] #cbi-nft-limiter-device,' +
+                '.nftl-page[data-tab="stats"] .nftl-formwrap,' +
+                '.nftl-page:not([data-tab="stats"]) .nftl-statswrap{display:none}' +
+                '.nftl-global{display:inline-block;margin-top:.4em;padding:.2em .6em;border-radius:4px;' +
+                'font-size:12px;background:rgba(240,173,78,.15);border-left:3px solid #f0ad4e}' +
                 '.nftl-rangebar{display:flex;flex-wrap:wrap;gap:.3em;align-items:center;margin:.3em 0 .6em}' +
                 '.nftl-rangebar .cbi-button{margin:0}' +
                 '.nftl-custom input{width:auto;min-width:0}' +
@@ -1396,12 +1401,30 @@ return view.extend({
                 '.nftl-count,.nftl-sub{font-size:13px;font-weight:normal;color:#888;' +
                 'margin-left:.6em;vertical-align:middle}'
             ]);
-            // The status poll also refreshes the device count on the heading.
+            // Global limit indicator in the header, since its settings now sit
+            // on the Settings tab: shown while the global limit's rules are
+            // loaded, with its rates and schedule (as saved).
+            var globalBadge = E('div', { 'class': 'nftl-global', 'style': 'display:none' });
+            var updateGlobal = function(enabled, out) {
+                var on = enabled && out != null && /"comment":\s*"default_(dl|ul)"/.test(out);
+                globalBadge.style.display = on ? '' : 'none';
+                if (!on) return;
+                var g = uci.get_first('nft-limiter', 'nft-limiter') || {};
+                var when = _('always');
+                if (g.gschedule === '1') {
+                    var dev = { timestart: g.timestart, timeend: g.timeend, week: g.week };
+                    if (hasSchedule(dev)) when = describeRule(Object.assign({ target: '' }, dev)).replace(/^.*, /, '');
+                }
+                globalBadge.textContent = _('Global limit on: down %s / up %s Mbit/s, %s, shared by all devices without their own rule').format(
+                    g.download || '0', g.upload || '0', when);
+            };
+            // The status poll also refreshes the device count on the Rules
+            // heading and the global limit indicator.
             var status = nftctl.render(function(enabled, out) {
                 setCount(enabled && out != null ? nftctl.countDevices(out) : null);
-            });
-            var root = E('div', {}, [ gridCss, status, tabs, buildFooter() ]);
-            ui.tabs.initTabGroup(tabs.childNodes);
+                updateGlobal(enabled, out);
+            }, globalBadge);
+            var root = E('div', {}, [ gridCss, status, page, buildFooter() ]);
             setRange(range);
             return root;
         });

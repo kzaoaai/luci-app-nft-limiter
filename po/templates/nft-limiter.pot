@@ -136,8 +136,6 @@ msgstr ""
 msgid "Update via SSH:"
 msgstr ""
 
-msgid "NFT Limiter Status"
-msgstr ""
 
 msgid "Traffic Statistics"
 msgstr ""
@@ -151,8 +149,6 @@ msgstr ""
 msgid "fw4 nft mode"
 msgstr ""
 
-msgid "global default limit active"
-msgstr ""
 
 msgid "no rules loaded"
 msgstr ""
@@ -427,8 +423,6 @@ msgstr ""
 msgid "Show"
 msgstr ""
 
-msgid "Advanced Settings"
-msgstr ""
 
 msgid "Keep History For (months)"
 msgstr ""
@@ -449,4 +443,10 @@ msgid "How much traffic may pass above a limit in a short burst, in seconds of t
 msgstr ""
 
 msgid "Speeds are measured over the last few seconds; totals since the router started (they carry over rule changes and Restart, and reset on Disable or reboot). Rows covering several devices, and the global limit, expand (\\u25b8) into a per-device breakdown. Tinted rows are dropping traffic right now."
+msgstr ""
+
+msgid "Rules"
+msgstr ""
+
+msgid "Global limit on: down %s / up %s Mbit/s, %s, shared by all devices without their own rule"
 msgstr ""

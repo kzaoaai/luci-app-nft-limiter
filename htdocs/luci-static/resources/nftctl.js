@@ -73,15 +73,12 @@ return baseclass.extend({
         var stateTxt = enabled ? _('Running') : _('Stopped');
         var color    = enabled ? '#4CAF50' : '#f44336';
 
-        // Problems and the global limit only, shown when the service is
-        // enabled. The device count is shown on the Per-Device Rules heading.
+        // Problems only, shown when the service is enabled. The device count
+        // is on the Rules heading; the page adds its own lines (self.extra,
+        // e.g. the global limit indicator) under the state line.
         var detail = null;
-        if (enabled) {
-            if (out === null)
-                detail = _('no rules loaded');
-            else if (/"comment":\s*"default_(dl|ul)"/.test(out))
-                detail = _('global default limit active');
-        }
+        if (enabled && out === null)
+            detail = _('no rules loaded');
 
         // Grey out the button that would not change anything: Enable while
         // running, Disable and Restart while stopped.
@@ -100,6 +97,7 @@ return baseclass.extend({
                 ' (' + _('fw4 nft mode') + ')'
             ]),
             detail ? E('div', { 'style': 'color:#666;margin-top:.2em' }, detail) : '',
+            self.extra || '',
             E('div', { 'style': 'margin-top:.6em' }, [
                 btn(_('Enable'),  'cbi-button-apply',    'on',      enabled),  ' ',
                 btn(_('Disable'), 'cbi-button-negative', 'off',     !enabled), ' ',
@@ -108,17 +106,24 @@ return baseclass.extend({
         ]);
     },
 
-    // Build the always-visible status section. Self-loads the real state and
-    // polls every 5s. onUpdate(enabled, out), if given, runs after each poll.
-    render: function(onUpdate) {
+    // Build the always-visible header: the page title and subtitle, the
+    // service state and controls. Self-loads the real state and polls every
+    // 5s. onUpdate(enabled, out), if given, runs after each poll; extra, if
+    // given, is a node shown under the state line.
+    render: function(onUpdate, extra) {
         var self = this;
         self.onUpdate = onUpdate;
+        self.extra = extra;
         var box = E('div', { 'style': 'margin:.25em 0 1em' });
         self.fill(box, false, null);
         self.refresh(box);
         poll.add(function() { return self.refresh(box); }, 5);
         return E('div', { 'class': 'cbi-section' }, [
-            E('h3', {}, _('NFT Limiter Status')),
+            E('h2', {}, [
+                _('NFT Limiter'),
+                E('span', { 'style': 'font-size:13px;font-weight:normal;color:#888;margin-left:.6em;vertical-align:middle' },
+                    _('Per-device bandwidth control via nftables rate limiting. Requires OpenWrt 25.12+ with firewall4 / nftables.'))
+            ]),
             box
         ]);
     }
