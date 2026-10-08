@@ -25,7 +25,8 @@
 # (meta iifname for download, meta oifname for upload), so LAN-to-LAN
 # traffic is never rate-limited.
 #
-# Commands: start | stop | add <idx> | del <idx> | status | stats
+# Commands: start | stop | add <idx> | del <idx> | status | stats |
+#           snapshot | history <from|preset> [to]
 #   (add/del rebuild the whole chain; kept for compatibility)
 
 . /lib/functions.sh
@@ -42,6 +43,13 @@ FW4_LINK="/usr/share/nftables.d/table-post/30-nft-limiter.nft"
 # Row index -> row key ("sorted,targets") at the last build, so a rebuild
 # can carry each row's counters over even if rows were reordered.
 KEYS_FILE="/var/run/nft-limiter.keys"
+# Usage history (RAM, tiered) and its flash copy, written once a day and
+# at shutdown. See the History section below.
+HIST_DIR="/var/run/nft-limiter-hist"
+HIST_SAVE="/etc/nft-limiter.hist.tgz"
+HIST_FINE_DAYS=7
+HIST_HOURLY_DAYS=45
+HIST_DAILY_DAYS=400
 # UTC offset at the last build; the ntp hotplug hook rebuilds on a change.
 TZOFF_FILE="/var/run/nft-limiter.tzoff"
 OBJ_PREFIX="nftlim_"
@@ -201,6 +209,16 @@ _snapshot_counters() {
             P[k] += p; B[k] += b
         }
         END { for (k in P) printf "C\t%s\t%s\t%s\n", k, P[k], B[k] }' >> "$_carry_file"
+    # Quota usage, by row key: "quota nftlim_q_<idx> { over N bytes used M bytes }".
+    nft list quotas table inet "$NFT_TABLE" 2>/dev/null | tr '\n\t' '  ' | sed 's/}/}\n/g' \
+        | awk -v kf="$KEYS_FILE" -v p="${OBJ_PREFIX}q_" '
+            BEGIN { while ((getline l < kf) > 0) { split(l, a, "\t"); key[a[1]] = a[2] } }
+            { for (i = 1; i < NF; i++) {
+                  if ($i == "quota" && index($(i + 1), p) == 1) idx = substr($(i + 1), length(p) + 1)
+                  if ($i == "used") u = $(i + 1)
+              }
+              if (idx != "" && (idx in key)) printf "Q\t%s\t%s\n", key[idx], u + 0
+              idx = ""; u = 0 }' >> "$_carry_file"
     for name in $(_list_objects set); do
         case "$name" in "${OBJ_PREFIX}acct_"*) ;; *) continue ;; esac
         idx="${name#${OBJ_PREFIX}acct_}"; dir="${idx#*_}"; idx="${idx%%_*}"
@@ -246,6 +264,16 @@ _acct_set() {
 _dir_lines() {
     local tag="$1" match="$2" prefix="$3" kb="$4" block="$5" lname="$6"
     local t="${tag#*_}"
+    # Quota: a rule that consumes the row's quota and, once it is used up,
+    # drops (block) or drops above the throttle rate (throttle). Placed
+    # first, so each packet counts against the quota once.
+    if [ -n "$_q_name" ] && [ "$block" != "1" ]; then
+        local qlim=""
+        [ -n "$_q_throttle" ] && qlim="limit name \"${OBJ_PREFIX}qlim_${tag%%_*}_${t%6}\" "
+        _counter "${t}_q"
+        printf '        %s %squota name "%s" %s%s drop comment "dev_%s_q"\n' \
+            "$match" "$prefix" "$_q_name" "$qlim" "$_ctr" "$tag"
+    fi
     if [ "$block" = "1" ]; then
         _counter "$t"
         printf '        %s %s%s drop comment "dev_%s"\n' "$match" "$prefix" "$_ctr" "$tag"
@@ -464,6 +492,30 @@ _emit_device() {
     done
     _rowkey=$(for t in $target; do echo "$t"; done | sort | tr '\n' ',')
     _rowkey="${_rowkey%,}"
+    # Quota (GB per day or per billing period): a quota object seeded with
+    # what the row already used this period (live object, else history),
+    # plus throttle limits when the action is to slow down, not block.
+    local quota qper qact qrate qused qb
+    quota=$(uci -q get "${NAME}.@device[${idx}].quota")
+    qper=$(uci -q get "${NAME}.@device[${idx}].quota_period"); qper=${qper:-day}
+    qact=$(uci -q get "${NAME}.@device[${idx}].quota_action"); qact=${qact:-block}
+    qrate=$(uci -q get "${NAME}.@device[${idx}].quota_rate")
+    _q_name=""; _q_throttle=""
+    qb=$(awk -v g="${quota:-0}" 'BEGIN { printf "%.0f", g * 1000000000 }')
+    if [ "$qb" -gt 0 ] 2>/dev/null && [ "${block:-0}" != 1 ]; then
+        _q_name="${OBJ_PREFIX}q_${idx}"
+        qused=$(awk -F '\t' -v k="$_rowkey" '$1 == "Q" && $2 == k { print $3; exit }' "$_carry_file")
+        [ -n "$qused" ] || qused=$(_quota_used "$_rowkey" "$qper")
+        printf '    quota %s { over %s bytes used %s bytes }\n' "$_q_name" "$qb" "${qused:-0}" >> "$_obj_file"
+        if [ "$qact" = throttle ]; then
+            _q_throttle=1
+            qrate=$(_mbit_to_kb "${qrate:-1}")
+            for t in dl ul; do
+                printf '    limit %sqlim_%s_%s { rate over %s kbytes/second burst %s kbytes }\n' \
+                    "$OBJ_PREFIX" "$idx" "$t" "$qrate" "$(( qrate * 2 ))" >> "$_obj_file"
+            done
+        fi
+    fi
     printf '%s\t%s\n' "$idx" "$_rowkey" >> "${KEYS_FILE}.new"
     _time_and_day_expr "$timestart" "$timeend" "$week"
     _rule_lines "$idx" "$target" "$dl_kb" "$ul_kb" "${block:-0}" "$macs" "$_time_expr" "$_day_expr"
@@ -491,6 +543,8 @@ build_chain() {
     _learn_file="/tmp/nft-limiter-learn.$$"
     _carry_file="/tmp/nft-limiter-carry.$$"
     _carried=""
+    # Record usage up to now before the rules change.
+    snapshot >/dev/null 2>&1
     : > "$rules_file"; : > "$_obj_file"; : > "$_learn_file"; : > "${KEYS_FILE}.new"
     _snapshot_counters
 
@@ -555,6 +609,9 @@ build_chain() {
         for name in $(_list_objects limit); do
             printf 'delete limit inet %s %s\n' "$NFT_TABLE" "$name"
         done
+        for name in $(_list_objects quota); do
+            printf 'delete quota inet %s %s\n' "$NFT_TABLE" "$name"
+        done
         # Accounting sets are recreated with their carried elements.
         for name in $(_list_objects set); do
             case "$name" in "${OBJ_PREFIX}acct_"*)
@@ -582,7 +639,13 @@ start() {
 
 stop() {
     local name
+    # Record and save usage first (this also runs at shutdown).
+    snapshot >/dev/null 2>&1
+    _hist_save
     nft delete chain inet "${NFT_TABLE}" "${NFT_CHAIN}" 2>/dev/null
+    for name in $(_list_objects quota); do
+        nft delete quota inet "${NFT_TABLE}" "$name" 2>/dev/null
+    done
     for name in $(_list_objects limit); do
         nft delete limit inet "${NFT_TABLE}" "$name" 2>/dev/null
     done
@@ -603,11 +666,265 @@ status() {
     uci show firewall 2>/dev/null | grep -A4 "nft-limiter" || echo "(no firewall hook)"
 }
 
+
+# -----------------------------------------------------------------------
+# History
+#
+# Every rule's counters are running totals, so usage over a time range
+# needs snapshots. "snapshot" (run by the ntp hotplug hook about every
+# 11 minutes, before every rebuild, and on stop) reads every value below,
+# turns it into a delta against the previous snapshot (a value that went
+# down was reset - reboot, Disable, interface restart - so the delta is the
+# new value) and files the non-zero deltas in three tiers:
+#   fine.log    one line per snapshot, kept HIST_FINE_DAYS
+#   hourly.log  one line per local hour, kept HIST_HOURLY_DAYS
+#   daily.log   one line per local day, kept HIST_DAILY_DAYS
+# Line format: "<epoch> key=bytes key=bytes ...". Hourly/daily lines are
+# stamped with the bucket start; fine lines with the snapshot time. Keys:
+#   R|<row key>|d|u|dd|ud   row accepted down/up, dropped down/up
+#   A|<row key>|<addr>|d|u  per-address traffic of multi-address rows and
+#                           of the global limit (row key "default")
+#   I|<interface>|rx|tx     bytes through each rate-limited interface
+# The whole directory is copied to flash once a day and at shutdown, and
+# restored at boot.
+# -----------------------------------------------------------------------
+_tz_seconds() {
+    date +%z | awk '{ s = substr($1, 1, 1); h = substr($1, 2, 2) + 0; m = substr($1, 4, 2) + 0
+        o = h * 3600 + m * 60; print (s == "-") ? -o : o }'
+}
+
+_collect_values() {
+    local name idx dir key i dev f
+    nft list chain inet "$NFT_TABLE" "$NFT_CHAIN" 2>/dev/null | awk -v kf="$KEYS_FILE" '
+        BEGIN { FS = "[ \t]+"; while ((getline l < kf) > 0) { split(l, a, "\t"); key[a[1]] = a[2] } }
+        / counter packets / && / comment "/ {
+            b = c = ""
+            for (i = 1; i < NF; i++) {
+                if ($i == "bytes") b = $(i + 1)
+                if ($i == "comment") c = $(i + 1)
+            }
+            gsub(/"/, "", c)
+            if (c == "default_dl") { V["R|default|dd"] += b; next }
+            if (c == "default_ul") { V["R|default|ud"] += b; next }
+            if (!match(c, /^dev_[0-9]+_/)) next
+            idx = substr(c, 5, RLENGTH - 5); t = substr(c, RLENGTH + 1)
+            if (!(idx in key)) next
+            if (t == "dl_pass" || t == "dl6_pass") s = "d"
+            else if (t == "ul_pass" || t == "ul6_pass") s = "u"
+            else if (t ~ /^dl/) s = "dd"
+            else if (t ~ /^ul/) s = "ud"
+            else next
+            V["R|" key[idx] "|" s] += b
+        }
+        END { for (k in V) print k "\t" V[k] }'
+    for name in $(_list_objects set); do
+        case "$name" in "${OBJ_PREFIX}acct_"*) ;; *) continue ;; esac
+        idx="${name#${OBJ_PREFIX}acct_}"; dir="${idx#*_}"; idx="${idx%%_*}"
+        if [ "$idx" = "def" ]; then key="default"; else
+            key=$(awk -F '\t' -v i="$idx" '$1 == i { print $2; exit }' "$KEYS_FILE" 2>/dev/null)
+            [ -n "$key" ] || continue
+        fi
+        case "$dir" in dl*) dir=d ;; *) dir=u ;; esac
+        nft list set inet "$NFT_TABLE" "$name" 2>/dev/null | tr '\n\t' '  ' \
+            | sed -n 's/.*elements = { \([^}]*\) }.*/\1/p' | tr ',' '\n' \
+            | awk -v k="$key" -v d="$dir" '{ for (i = 1; i < NF; i++) if ($i == "bytes") print "A|" k "|" $1 "|" d "\t" $(i + 1) }'
+    done
+    for i in $(uci -q get "${NAME}.@${NAME}[0].iface"); do
+        dev=$(ifstatus "$i" 2>/dev/null | jsonfilter -e '@.l3_device' 2>/dev/null)
+        [ -n "$dev" ] || continue
+        for f in rx tx; do
+            [ -r "/sys/class/net/$dev/statistics/${f}_bytes" ] && \
+                printf 'I|%s|%s\t%s\n' "$i" "$f" "$(cat "/sys/class/net/$dev/statistics/${f}_bytes")"
+        done
+    done
+}
+
+# _acc_add <acc file> <bucket start> <closed log> -- add the delta line on
+#   stdin to an open bucket; a bucket from an earlier period is closed
+#   (appended to <closed log>) first. Prints 1 if it closed one.
+_acc_add() {
+    local f="$1" start="$2" log="$3" closed=0
+    if [ -s "$f" ] && [ "$(head -n 1 "$f")" != "$start" ]; then
+        awk 'NR == 1 { printf "%s", $1; next } { printf " %s=%s", $1, $2 } END { print "" }' "$f" >> "$log"
+        rm -f "$f"; closed=1
+    fi
+    awk -v f="$f" -v start="$start" '
+        BEGIN { while ((getline l < f) > 0) { n++; if (n > 1) { split(l, a, " "); A[a[1]] = a[2] } } close(f) }
+        { for (i = 2; i <= NF; i++) { split($i, kv, "="); A[kv[1]] += kv[2] } }
+        END { print start > f; for (k in A) print k " " A[k] > f }'
+    echo "$closed"
+}
+
+# _prune <log> <keep seconds> <cut file> <align seconds> -- drop records
+#   older than the aligned cut; the cut is recorded so queries know where
+#   this tier's coverage starts.
+_prune() {
+    local log="$1" cut
+    cut=$(( $(date +%s) - $2 ))
+    cut=$(( cut - (cut + $(_tz_seconds)) % $4 ))
+    [ -f "$log" ] || return 0
+    awk -v c="$cut" '$1 >= c' "$log" > "$log.new" && mv "$log.new" "$log"
+    echo "$cut" > "$3"
+}
+
+_hist_save() {
+    [ -d "$HIST_DIR" ] || return 0
+    tar -czf "${HIST_SAVE}.new" -C "$HIST_DIR" . 2>/dev/null && mv "${HIST_SAVE}.new" "$HIST_SAVE"
+}
+
+_hist_restore() {
+    [ -d "$HIST_DIR" ] && return 0
+    [ -f "$HIST_SAVE" ] || return 0
+    mkdir -p "$HIST_DIR" && tar -xzf "$HIST_SAVE" -C "$HIST_DIR" 2>/dev/null
+}
+
+snapshot() {
+    local now off cur line hs ds closed_h closed_d
+    _hist_restore
+    mkdir -p "$HIST_DIR"
+    now=$(date +%s)
+    cur="$HIST_DIR/cur.$$"
+    _collect_values > "$cur"
+    if [ ! -f "$HIST_DIR/last.vals" ]; then
+        mv "$cur" "$HIST_DIR/last.vals"; echo "$now" > "$HIST_DIR/last.ts"
+        return 0
+    fi
+    line=$(awk -v now="$now" -F '\t' '
+        FNR == NR { last[$1] = $2; next }
+        { c = $2 + 0; p = ($1 in last) ? last[$1] + 0 : 0; d = (c >= p) ? c - p : c
+          if (d > 0) out = out " " $1 "=" d }
+        END { print now out }' "$HIST_DIR/last.vals" "$cur")
+    mv "$cur" "$HIST_DIR/last.vals"; echo "$now" > "$HIST_DIR/last.ts"
+    echo "$line" >> "$HIST_DIR/fine.log"
+    off=$(_tz_seconds)
+    hs=$(( now - (now + off) % 3600 )); ds=$(( now - (now + off) % 86400 ))
+    closed_h=$(echo "$line" | _acc_add "$HIST_DIR/hour.acc" "$hs" "$HIST_DIR/hourly.log")
+    closed_d=$(echo "$line" | _acc_add "$HIST_DIR/day.acc" "$ds" "$HIST_DIR/daily.log")
+    [ "$closed_h" = 1 ] && _prune "$HIST_DIR/fine.log" $(( HIST_FINE_DAYS * 86400 )) "$HIST_DIR/fine.cut" 3600
+    if [ "$closed_d" = 1 ]; then
+        _prune "$HIST_DIR/hourly.log" $(( HIST_HOURLY_DAYS * 86400 )) "$HIST_DIR/hourly.cut" 86400
+        _prune "$HIST_DIR/daily.log" $(( HIST_DAILY_DAYS * 86400 )) "$HIST_DIR/daily.cut" 86400
+        _quota_rollover
+        _hist_save
+    fi
+    return 0
+}
+
+# _period_start [prev] -- epoch of the current (or previous) billing period
+#   start: day period_day (1-28, default 1) of the month, local midnight.
+_period_start() {
+    local pd y m d
+    pd=$(uci -q get "${NAME}.@${NAME}[0].period_day"); pd=${pd:-1}
+    y=$(date +%Y); m=$(date +%m); d=$(date +%d)
+    m=${m#0}; d=${d#0}
+    [ "$d" -lt "$pd" ] && { m=$(( m - 1 )); [ "$m" -lt 1 ] && { m=12; y=$(( y - 1 )); }; }
+    [ "$1" = prev ] && { m=$(( m - 1 )); [ "$m" -lt 1 ] && { m=12; y=$(( y - 1 )); }; }
+    date -d "$(printf '%04d-%02d-%02d 00:00' "$y" "$m" "$pd")" +%s
+}
+
+# _quota_rollover -- at the first snapshot of a new local day, reset the
+#   daily quotas, and the billing-period ones when a period starts today.
+#   (Up to one snapshot interval, ~11 min, after midnight.)
+_quota_rollover() {
+    local name idx per pd today
+    pd=$(uci -q get "${NAME}.@${NAME}[0].period_day"); pd=${pd:-1}
+    today=$(date +%d); today=${today#0}
+    for name in $(_list_objects quota); do
+        idx="${name#${OBJ_PREFIX}q_}"
+        per=$(uci -q get "${NAME}.@device[${idx}].quota_period")
+        if [ "${per:-day}" = day ] || [ "$today" = "$pd" ]; then
+            nft reset quota inet "$NFT_TABLE" "$name" >/dev/null 2>&1
+        fi
+    done
+}
+
+# _quota_used <row key> <period> -- bytes the row used since its quota
+#   period began (offered traffic, both directions), from the history.
+#   Seeds a quota that has no live object (boot, new quota).
+_quota_used() {
+    local from now off
+    now=$(date +%s); off=$(_tz_seconds)
+    if [ "$2" = period ]; then from=$(_period_start); else from=$(( now - (now + off) % 86400 )); fi
+    _hist_records | awk -v F="$from" -v rk="R|$1|" '
+        $2 >= F { for (j = 3; j <= NF; j++) if (index($j, rk) == 1) { n = index($j, "="); s += substr($j, n + 1) } }
+        END { printf "%d", s }'
+}
+
+# _hist_sum <from> <to> -- print "key<TAB>bytes" summed over [from, to),
+#   using the finest tier that covers each part, plus traffic since the
+#   last snapshot when <to> is now.
+_hist_records() {
+    local fc=0 hc=0
+    [ -f "$HIST_DIR/fine.cut" ] && fc=$(cat "$HIST_DIR/fine.cut")
+    [ -f "$HIST_DIR/hourly.cut" ] && hc=$(cat "$HIST_DIR/hourly.cut")
+    { [ -f "$HIST_DIR/daily.log" ] && awk -v c="$hc" '$1 < c { print 86400, $0 }' "$HIST_DIR/daily.log"
+      [ -f "$HIST_DIR/hourly.log" ] && awk -v c="$fc" '$1 < c { print 3600, $0 }' "$HIST_DIR/hourly.log"
+      [ -f "$HIST_DIR/fine.log" ] && awk '{ print 0, $0 }' "$HIST_DIR/fine.log"
+      if [ -f "$HIST_DIR/last.vals" ]; then
+          _collect_values | awk -v now="$(date +%s)" -F '\t' -v lf="$HIST_DIR/last.vals" '
+              BEGIN { while ((getline l < lf) > 0) { split(l, a, "\t"); last[a[1]] = a[2] } }
+              { c = $2 + 0; p = ($1 in last) ? last[$1] + 0 : 0; d = (c >= p) ? c - p : c
+                if (d > 0) out = out " " $1 "=" d }
+              END { print 0, now out }'
+      fi; } 2>/dev/null
+}
+
+# history <from|today|yesterday|7d|period|lastperiod> [to] -- JSON for the
+#   Stats tab: totals per key over the range, and per-bucket series for the
+#   row (R ... d/u) and interface (I ...) keys.
+history() {
+    local now off t0 from to base range bucket fc hc
+    now=$(date +%s); off=$(_tz_seconds); t0=$(( now - (now + off) % 86400 ))
+    case "$1" in
+        today)      from=$t0; to=$now ;;
+        yesterday)  from=$(( t0 - 86400 )); to=$t0 ;;
+        7d)         from=$(( now - 7 * 86400 )); to=$now ;;
+        period)     from=$(_period_start); to=$now ;;
+        lastperiod) from=$(_period_start prev); to=$(_period_start) ;;
+        *)          from=${1:-$t0}; to=${2:-$now} ;;
+    esac
+    # Take a snapshot first if the hook has not run lately (no NTP sync).
+    if [ -f "$HIST_DIR/last.ts" ] && [ $(( now - $(cat "$HIST_DIR/last.ts") )) -gt 900 ]; then
+        snapshot >/dev/null 2>&1
+    fi
+    fc=0; hc=0
+    [ -f "$HIST_DIR/fine.cut" ] && fc=$(cat "$HIST_DIR/fine.cut")
+    [ -f "$HIST_DIR/hourly.cut" ] && hc=$(cat "$HIST_DIR/hourly.cut")
+    base=660
+    [ "$from" -lt "$fc" ] && base=3600
+    [ "$from" -lt "$hc" ] && base=86400
+    range=$(( to - from )); bucket=$(( (range + 149) / 150 ))
+    [ "$bucket" -lt "$base" ] && bucket=$base
+    _hist_records | awk -v F="$from" -v T="$to" -v B="$bucket" -v now="$now" -v fc="$fc" -v hc="$hc" '
+        { t = $2; if (t < F || t >= T + ($1 == 0 ? 60 : 0)) next
+          i = int((t - F) / B)
+          for (j = 3; j <= NF; j++) {
+              n = index($j, "="); k = substr($j, 1, n - 1); v = substr($j, n + 1) + 0
+              tot[k] += v
+              if (k ~ /^R\|.*\|[du]$/ || k ~ /^I\|/) { ser[k, i] += v; sk[k] = 1 }
+          } }
+        END {
+            nb = int((T - F + B - 1) / B)
+            printf "{\"from\":%d,\"to\":%d,\"now\":%d,\"bucket\":%d,\"fine_from\":%d,\"hourly_from\":%d,\"totals\":{", F, T, now, B, fc, hc
+            sep = ""; for (k in tot) { printf "%s\"%s\":%d", sep, k, tot[k]; sep = "," }
+            printf "},\"series\":{"; sep = ""
+            for (k in sk) {
+                printf "%s\"%s\":[", sep, k; sep = ","
+                for (i = 0; i < nb; i++) printf "%s%d", (i ? "," : ""), ser[k, i]
+                printf "]"
+            }
+            print "}}"
+        }'
+    # Second line: the live quota objects, for the quota bars.
+    nft -j list quotas table inet "$NFT_TABLE" 2>/dev/null || echo '{}'
+}
+
 # stats -- for the LuCI Stats tab, one JSON document per line: the chain
 #   (rule counters), then each per-address accounting set.
 stats() {
     local name
     nft -j list chain inet "${NFT_TABLE}" "${NFT_CHAIN}" 2>/dev/null || echo null
+    nft -j list quotas table inet "${NFT_TABLE}" 2>/dev/null
     for name in $(_list_objects set); do
         case "$name" in "${OBJ_PREFIX}acct_"*)
             nft -j list set inet "${NFT_TABLE}" "$name" 2>/dev/null ;;
@@ -623,5 +940,7 @@ case "$1" in
     add|del) start ;;
     status) status ;;
     stats)  stats ;;
+    snapshot) snapshot ;;
+    history)  shift; history "$@" ;;
     *)      start ;;
 esac

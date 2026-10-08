@@ -300,3 +300,129 @@ msgstr ""
 
 msgid "No traffic since the counters started."
 msgstr ""
+
+msgid "%s covers %s-%s; use %s/%s, or a range such as %s-%s"
+msgstr ""
+
+msgid "No usage history yet. It starts recording when the limiter runs, about every 11 minutes."
+msgstr ""
+
+msgid "No traffic in this range."
+msgstr ""
+
+msgid "%s to %s"
+msgstr ""
+
+msgid "Dropped"
+msgstr ""
+
+msgid "Trend"
+msgstr ""
+
+msgid "No rule traffic in this range."
+msgstr ""
+
+msgid "Uplinks"
+msgstr ""
+
+msgid "All traffic through each rate-limited interface, the router's own included: the figure to compare with your ISP's counter."
+msgstr ""
+
+msgid "Interface"
+msgstr ""
+
+msgid "Received"
+msgstr ""
+
+msgid "Sent"
+msgstr ""
+
+msgid "Total"
+msgstr ""
+
+msgid "then %s Mbit/s"
+msgstr ""
+
+msgid "then blocked"
+msgstr ""
+
+msgid "%s of %s"
+msgstr ""
+
+msgid "this billing period"
+msgstr ""
+
+msgid "today"
+msgstr ""
+
+msgid "Quotas"
+msgstr ""
+
+msgid "Rule"
+msgstr ""
+
+msgid "Used"
+msgstr ""
+
+msgid "Period"
+msgstr ""
+
+msgid "When used up"
+msgstr ""
+
+msgid "Billing Period Starts On Day"
+msgstr ""
+
+msgid "Day of the month (1-28) your ISP starts a new billing period. Used by the Stats ranges \"This period\" / \"Last period\" and by per-period quotas."
+msgstr ""
+
+msgid "Quota (GB)"
+msgstr ""
+
+msgid "Data allowance for this rule, download and upload together, across all its targets. Leave empty for none."
+msgstr ""
+
+msgid "none"
+msgstr ""
+
+msgid "Quota Period"
+msgstr ""
+
+msgid "Per day"
+msgstr ""
+
+msgid "Per billing period"
+msgstr ""
+
+msgid "When Used Up"
+msgstr ""
+
+msgid "Throttle"
+msgstr ""
+
+msgid "Throttle To (Mbit/s)"
+msgstr ""
+
+msgid "Live"
+msgstr ""
+
+msgid "Today"
+msgstr ""
+
+msgid "Yesterday"
+msgstr ""
+
+msgid "7 days"
+msgstr ""
+
+msgid "This period"
+msgstr ""
+
+msgid "Last period"
+msgstr ""
+
+msgid "Custom"
+msgstr ""
+
+msgid "Show"
+msgstr ""

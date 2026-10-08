@@ -5,8 +5,13 @@
 # busybox ntpd sends "periodic" about every 11 minutes while synced; the
 # offset at the last build is written by nft-limiter (removed on stop).
 
+# The same event drives the usage history: one snapshot per run.
+
 [ "$ACTION" = "periodic" ] || [ "$ACTION" = "step" ] || exit 0
 [ -f /var/run/nft-limiter.tzoff ] || exit 0
-[ "$(date +%z)" = "$(cat /var/run/nft-limiter.tzoff)" ] && exit 0
-logger -t nft-limiter "UTC offset changed to $(date +%z), rebuilding schedules"
-/etc/init.d/nft-limiter reapply
+if [ "$(date +%z)" != "$(cat /var/run/nft-limiter.tzoff)" ]; then
+    logger -t nft-limiter "UTC offset changed to $(date +%z), rebuilding schedules"
+    /etc/init.d/nft-limiter reapply    # takes a snapshot itself
+else
+    /usr/bin/nft-limiter snapshot
+fi

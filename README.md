@@ -17,6 +17,8 @@ Fast, minimal-CPU per-device bandwidth control for OpenWrt using native **nftabl
 - **Overlap hints** — an "i" badge on rules that other rules also match, listing them in checking order and highlighting them in the grid
 - **Block toggle** — drop a device's WAN traffic outright (both directions), optionally on its schedule
 - **IPv6 aware** — a single-IPv4 device with a known MAC is also matched on IPv6 (upload by MAC, download by its learned global addresses), sharing one limit across both families; IPv6 addresses and prefixes work as targets too
+- **Usage history** — tiered history kept on the router (≈11-minute detail for 7 days, hourly for 45 days, daily for 13 months; saved to flash daily and at shutdown) with a range picker (today, yesterday, 7 days, this/last billing period, custom), per-rule trends, per-device breakdowns and per-uplink totals to compare with your ISP's counter
+- **Quotas** — per-rule data allowance per day or per billing period, then block or throttle
 - **Time scheduling** — time-of-day and day-of-week windows, both per-rule and for the global default limit
 - **Live stats** — current speed per rule, totals that survive rule changes, dropped traffic, a tint on rules that are limiting right now, and a per-device breakdown for subnet/range/multi-device rules and for the global limit (top talkers)
 - **Self-healing** — hooks into `firewall4` include so rules survive interface reloads
@@ -39,6 +41,7 @@ Then open **LuCI → Network → NFT Limiter**.
 ```
 config nft-limiter
     option enabled   1            # master service on/off
+    option period_day 1           # day of the month the ISP billing period starts
     option iface     'wan'        # interface(s) to rate-limit (space-separated). Include
                                   # every uplink (failover WAN, VPN tunnels that carry
                                   # policy-routed traffic): traffic leaving through an
@@ -62,6 +65,10 @@ config device
     option timeend   22:00
     option week      1,2,5             # Mon-Tue-Fri (0 = every day)
     option comment   'My Laptop'
+    option quota     5                 # GB allowance (optional)
+    option quota_period day            # day | period (billing period)
+    option quota_action throttle       # block | throttle
+    option quota_rate 1                # Mbit/s once used up (throttle)
     option mac       aa:bb:cc:dd:ee:01 # optional; LuCI fills it on save. Enables IPv6 matching
                                        # (otherwise looked up in static DHCP, leases, neighbours)
 

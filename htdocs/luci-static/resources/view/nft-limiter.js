@@ -233,6 +233,18 @@ function validateTarget(value) {
     return false;
 }
 
+// A CIDR whose address is not on its block boundary (192.168.1.100/28)
+// silently covers the aligned block (192.168.1.96-111). Returns a message
+// describing what it really covers, or null when it is fine.
+function cidrMisaligned(t) {
+    var m = String(t).match(/^([\d.]+)\/(\d{1,2})$/);
+    if (!m || !isIp4(m[1]) || +m[2] > 32) return null;
+    var span = ip4Span(t);
+    if (span[0] === ip4ToInt(m[1])) return null;
+    return _('%s covers %s-%s; use %s/%s, or a range such as %s-%s').format(
+        t, intToIp4(span[0]), intToIp4(span[1]), intToIp4(span[0]), m[2], m[1], intToIp4(span[1]));
+}
+
 // --- Stats tab -------------------------------------------------------------
 // Data: `nft-limiter stats` prints one JSON document per line, the chain
 // first (rule counters, keyed by comment), then each per-address accounting
@@ -257,7 +269,7 @@ function fmtRate(bps) {
 // or null when the chain is not loaded.
 function parseStats(text) {
     if (!text) return null;
-    var lines = String(text).split('\n'), counters = null, sets = {};
+    var lines = String(text).split('\n'), counters = null, sets = {}, quotas = null;
     lines.forEach(function(line, n) {
         if (!line.trim()) return;
         var data;
@@ -273,6 +285,7 @@ function parseStats(text) {
                 m.packets += c.packets || 0;
                 m.bytes += c.bytes || 0;
             }
+            if (item.quota) (quotas = quotas || []).push(item.quota);
             var st = item.set;
             if (st && st.name) {
                 sets[st.name] = (st.elem || []).map(function(el) {
@@ -283,7 +296,7 @@ function parseStats(text) {
             }
         });
     });
-    return counters ? { counters: counters, sets: sets } : null;
+    return counters ? { counters: counters, sets: sets, quotas: quotas || [] } : null;
 }
 
 // The Stats view: one row per rule (speed now, totals, dropped), rows that
@@ -392,7 +405,7 @@ function createStats(hints) {
             if (dev.enable === '0') label += ' ' + _('(disabled)');
             var p = 'dev_' + idx + '_';
             var dlAcc = sum([ p + 'dl_pass', p + 'dl6_pass' ]), ulAcc = sum([ p + 'ul_pass', p + 'ul6_pass' ]);
-            var dlDrop = sum([ p + 'dl', p + 'dl6' ]), ulDrop = sum([ p + 'ul', p + 'ul6' ]);
+            var dlDrop = sum([ p + 'dl', p + 'dl6', p + 'dl_q', p + 'dl6_q' ]), ulDrop = sum([ p + 'ul', p + 'ul6', p + 'ul_q', p + 'ul6_q' ]);
             if (dlAcc == null && ulAcc == null && dlDrop == null && ulDrop == null && dev.enable === '0') return;
             addRow('r' + idx, label, {
                 blocked: dev.block === '1',
@@ -426,7 +439,7 @@ function createStats(hints) {
                 _('Chain loaded, but no device or global limit rules are active.')));
             return;
         }
-        dom.content(box, E('table', { 'class': 'table nftl-stats' }, [
+        dom.content(box, [ E('table', { 'class': 'table nftl-stats' }, [
             E('tr', { 'class': 'tr table-titles' }, [
                 E('th', { 'class': 'th' }, _('Device')),
                 E('th', { 'class': 'th' }, _('Down now')),
@@ -434,7 +447,7 @@ function createStats(hints) {
                 E('th', { 'class': 'th' }, _('Down total')),
                 E('th', { 'class': 'th' }, _('Up total'))
             ])
-        ].concat(rows)));
+        ].concat(rows)), quotaTable(st.quotas) ]);
     };
 
     var last = null;
@@ -442,6 +455,177 @@ function createStats(hints) {
         node: box,
         update: function(text) { last = parseStats(text); render(last); }
     };
+}
+
+// --- Usage over a time range (history) ---------------------------------
+// Data: `nft-limiter history <preset|from to>` prints the range's totals and
+// per-bucket series as JSON, then a line with the live quota objects.
+function spark(values) {
+    var max = 0;
+    values.forEach(function(v) { if (v > max) max = v; });
+    var w = 120, h = 22, n = values.length || 1, bw = w / n;
+    var bars = values.map(function(v, i) {
+        var bh = max ? Math.max(v ? 1 : 0, Math.round(v / max * h)) : 0;
+        return '<rect x="' + (i * bw).toFixed(2) + '" y="' + (h - bh) + '" width="' + Math.max(bw - 0.5, 0.5).toFixed(2) + '" height="' + bh + '"/>';
+    }).join('');
+    var svg = E('span', { 'class': 'nftl-spark' });
+    svg.innerHTML = '<svg width="' + w + '" height="' + h + '" viewBox="0 0 ' + w + ' ' + h + '">' + bars + '</svg>';
+    return svg;
+}
+
+function addSeries(a, b) {
+    if (!a) return b ? b.slice() : [];
+    if (!b) return a.slice();
+    return a.map(function(v, i) { return v + (b[i] || 0); });
+}
+
+function createUsage(hints) {
+    var box = E('div', {});
+    var open = {};
+    var hostName = function(addr) {
+        return hints.getHostnameByIPAddr(addr) || hints.getHostnameByIP6Addr(addr) || '';
+    };
+    var fmtTime = function(t) {
+        return new Date(t * 1000).toLocaleString([], { dateStyle: 'medium', timeStyle: 'short' });
+    };
+
+    var render = function(text) {
+        var lines = String(text || '').split('\n'), data = null, quotas = [];
+        try { data = JSON.parse(lines[0]); } catch (e) {}
+        try {
+            (JSON.parse(lines[1] || '{}').nftables || []).forEach(function(it) { if (it.quota) quotas.push(it.quota); });
+        } catch (e) {}
+        if (!data) {
+            dom.content(box, E('div', { 'class': 'alert-message warning' },
+                _('No usage history yet. It starts recording when the limiter runs, about every 11 minutes.')));
+            return;
+        }
+        var T = data.totals || {}, S = data.series || {};
+        var rows = [];
+        var sub = function(prefix) {
+            var by = {};
+            Object.keys(T).forEach(function(k) {
+                if (k.indexOf(prefix) !== 0) return;
+                var rest = k.substr(prefix.length), cut = rest.lastIndexOf('|');
+                var addr = rest.substr(0, cut), dir = rest.substr(cut + 1);
+                var a = by[addr] || (by[addr] = { addr: addr, d: 0, u: 0 });
+                a[dir] += T[k];
+            });
+            return Object.keys(by).map(function(k) { return by[k]; })
+                .sort(function(x, y) { return (y.d + y.u) - (x.d + x.u); });
+        };
+        var addRow = function(id, label, d, u, dropped, series, detail) {
+            var hasDetail = Array.isArray(detail);
+            var toggle = hasDetail ? E('span', {
+                'class': 'nftl-expand', 'click': function() { open[id] = !open[id]; render(text); }
+            }, open[id] ? '\u25be' : '\u25b8') : E('span', { 'class': 'nftl-expand' });
+            rows.push(E('tr', { 'class': 'tr' }, [
+                E('td', { 'class': 'td' }, [ toggle, label ]),
+                E('td', { 'class': 'td' }, fmtBytes(d)),
+                E('td', { 'class': 'td' }, fmtBytes(u)),
+                E('td', { 'class': 'td' }, dropped ? E('span', { 'class': 'nftl-dropped' }, fmtBytes(dropped)) : '\u2014'),
+                E('td', { 'class': 'td' }, spark(series || []))
+            ]));
+            if (hasDetail && open[id]) {
+                if (!detail.length) rows.push(E('tr', { 'class': 'tr nftl-sub' }, [
+                    E('td', { 'class': 'td', 'colspan': 5 }, _('No traffic in this range.')) ]));
+                detail.forEach(function(a) {
+                    var name = hostName(a.addr);
+                    rows.push(E('tr', { 'class': 'tr nftl-sub' }, [
+                        E('td', { 'class': 'td' }, name ? (name + ' \u2014 ' + a.addr) : a.addr),
+                        E('td', { 'class': 'td' }, fmtBytes(a.d)),
+                        E('td', { 'class': 'td' }, fmtBytes(a.u)),
+                        E('td', { 'class': 'td' }, ''), E('td', { 'class': 'td' }, '')
+                    ]));
+                });
+            }
+        };
+
+        uci.sections('nft-limiter', 'device').forEach(function(dev, idx) {
+            var list = toList(dev.target);
+            if (!list.length) return;
+            var rk = list.slice().sort().join(','), p = 'R|' + rk + '|';
+            var d = T[p + 'd'] || 0, u = T[p + 'u'] || 0, dr = (T[p + 'dd'] || 0) + (T[p + 'ud'] || 0);
+            if (!d && !u && !dr && dev.enable === '0') return;
+            var label = dev.comment ? (dev.comment + ' \u2014 ' + list.join(', ')) : list.join(', ');
+            if (dev.enable === '0') label += ' ' + _('(disabled)');
+            var multi = list.length > 1 || /[\/-]/.test(list[0]);
+            addRow('r' + idx, label, d, u, dr, addSeries(S[p + 'd'], S[p + 'u']), multi ? sub('A|' + rk + '|') : null);
+        });
+        var def = sub('A|default|');
+        if (def.length || T['R|default|dd'] || T['R|default|ud']) {
+            var od = 0, ou = 0;
+            def.forEach(function(a) { od += a.d; ou += a.u; });
+            var dd = T['R|default|dd'] || 0, ud = T['R|default|ud'] || 0;
+            addRow('def', E('em', {}, _('Global default limit (shared)')),
+                Math.max(0, od - dd), Math.max(0, ou - ud), dd + ud, null, def);
+        }
+
+        var ifRows = [];
+        Object.keys(T).forEach(function(k) {
+            var m = k.match(/^I\|(.+)\|rx$/);
+            if (!m) return;
+            var n = m[1];
+            ifRows.push(E('tr', { 'class': 'tr' }, [
+                E('td', { 'class': 'td' }, n),
+                E('td', { 'class': 'td' }, fmtBytes(T['I|' + n + '|rx'] || 0)),
+                E('td', { 'class': 'td' }, fmtBytes(T['I|' + n + '|tx'] || 0)),
+                E('td', { 'class': 'td' }, fmtBytes((T['I|' + n + '|rx'] || 0) + (T['I|' + n + '|tx'] || 0))),
+                E('td', { 'class': 'td' }, spark(addSeries(S['I|' + n + '|rx'], S['I|' + n + '|tx'])))
+            ]));
+        });
+
+        var head = function(cols) {
+            return E('tr', { 'class': 'tr table-titles' }, cols.map(function(c) { return E('th', { 'class': 'th' }, c); }));
+        };
+        var out = [
+            E('p', { 'class': 'nftl-range-label' }, _('%s to %s').format(fmtTime(data.from), fmtTime(Math.min(data.to, data.now))))
+        ];
+        out.push(rows.length ? E('table', { 'class': 'table nftl-stats' },
+            [ head([ _('Device'), _('Down'), _('Up'), _('Dropped'), _('Trend') ]) ].concat(rows))
+            : E('div', { 'class': 'alert-message' }, _('No rule traffic in this range.')));
+        if (ifRows.length) {
+            out.push(E('h4', {}, _('Uplinks')));
+            out.push(E('p', {}, _('All traffic through each rate-limited interface, the router\'s own included: the figure to compare with your ISP\'s counter.')));
+            out.push(E('table', { 'class': 'table nftl-stats' },
+                [ head([ _('Interface'), _('Received'), _('Sent'), _('Total'), _('Trend') ]) ].concat(ifRows)));
+        }
+        if (quotas.length) out.push(quotaTable(quotas));
+        dom.content(box, out);
+    };
+
+    return { node: box, render: render };
+}
+
+// Quota usage, from the live quota objects (nftlim_q_<row index>).
+function quotaTable(quotas) {
+    var devs = uci.sections('nft-limiter', 'device');
+    var rows = quotas.filter(function(q) { return /^nftlim_q_\d+$/.test(q.name); }).map(function(q) {
+        var dev = devs[+q.name.substr(9)] || {};
+        var used = q.used || 0, limit = q.bytes || 0, pct = limit ? Math.min(100, used / limit * 100) : 0;
+        var label = dev.comment || toList(dev.target).join(', ');
+        var action = dev.quota_action === 'throttle'
+            ? _('then %s Mbit/s').format(dev.quota_rate || '1') : _('then blocked');
+        return E('tr', { 'class': 'tr' }, [
+            E('td', { 'class': 'td' }, label),
+            E('td', { 'class': 'td' }, [
+                E('div', { 'class': 'nftl-qbar' }, E('div', {
+                    'class': 'nftl-qfill' + (pct >= 100 ? ' nftl-qfull' : ''), 'style': 'width:' + pct.toFixed(1) + '%'
+                })),
+                E('div', { 'class': 'nftl-qtext' }, _('%s of %s').format(fmtBytes(used), fmtBytes(limit)))
+            ]),
+            E('td', { 'class': 'td' }, dev.quota_period === 'period' ? _('this billing period') : _('today')),
+            E('td', { 'class': 'td' }, pct >= 100 ? E('strong', {}, action) : action)
+        ]);
+    });
+    if (!rows.length) return '';
+    return E('div', {}, [
+        E('h4', {}, _('Quotas')),
+        E('table', { 'class': 'table nftl-stats' }, [
+            E('tr', { 'class': 'tr table-titles' }, [ _('Rule'), _('Used'), _('Period'), _('When used up') ]
+                .map(function(c) { return E('th', { 'class': 'th' }, c); }))
+        ].concat(rows))
+    ]);
 }
 
 return view.extend({
@@ -593,6 +777,11 @@ return view.extend({
         updateUplinkWarn(uci.get_first('nft-limiter', 'nft-limiter', 'iface') || 'wan');
         o.onchange = function(ev, section_id, value) { updateUplinkWarn(value); };
 
+        o = s.option(form.Value, 'period_day', _('Billing Period Starts On Day'),
+            _('Day of the month (1-28) your ISP starts a new billing period. Used by the Stats ranges "This period" / "Last period" and by per-period quotas.'));
+        o.datatype = 'range(1,28)';
+        o.placeholder = '1';
+
         // Toggle for the global default (catch-all) limit, backed by a real UCI
         // flag the engine honours. Initial state is inferred from existing limit
         // values so upgrades don't silently drop a configured global limit.
@@ -720,9 +909,14 @@ return view.extend({
         o.create    = true;
         o.placeholder = _('Pick devices, or type an IP / CIDR / range');
         o.validate = function(section_id, value) {
-            var bad = toList(value).filter(function(t) { return !validateTarget(t); });
-            if (!bad.length) return true;
-            return _('Not an IP, CIDR, or IPv4 range: %s').format(bad.join(', '));
+            var list = toList(value);
+            var bad = list.filter(function(t) { return !validateTarget(t); });
+            if (bad.length) return _('Not an IP, CIDR, or IPv4 range: %s').format(bad.join(', '));
+            for (var i = 0; i < list.length; i++) {
+                var mis = cidrMisaligned(list[i]);
+                if (mis) return mis;
+            }
+            return true;
         };
         var namedDevices = [], unnamedDevices = [];
         var macByIp4 = {};
@@ -831,6 +1025,31 @@ return view.extend({
         o.placeholder = _('optional note');
         o.editable = true;
         o.width = '18%';
+
+        // Quota (Edit dialog only): a data allowance for the rule, both
+        // directions and all its targets together. Once used up, the rule
+        // blocks or throttles until the period ends (reset shortly after
+        // midnight, router time). Ignored while Block is ticked.
+        o = s.option(form.Value, 'quota', _('Quota (GB)'),
+            _('Data allowance for this rule, download and upload together, across all its targets. Leave empty for none.'));
+        o.modalonly = true;
+        o.datatype = 'ufloat';
+        o.placeholder = _('none');
+        o = s.option(form.ListValue, 'quota_period', _('Quota Period'));
+        o.modalonly = true;
+        o.value('day', _('Per day'));
+        o.value('period', _('Per billing period'));
+        o.default = 'day';
+        o = s.option(form.ListValue, 'quota_action', _('When Used Up'));
+        o.modalonly = true;
+        o.value('block', _('Block'));
+        o.value('throttle', _('Throttle'));
+        o.default = 'block';
+        o = s.option(form.Value, 'quota_rate', _('Throttle To (Mbit/s)'));
+        o.modalonly = true;
+        o.datatype = 'ufloat';
+        o.placeholder = '1';
+        o.depends('quota_action', 'throttle');
 
         // On save, record each single-IPv4 rule's MAC so the backend can add
         // IPv6 rules even while the device is offline at boot. Unknown or
@@ -993,14 +1212,58 @@ return view.extend({
         };
 
         return m.render().then(function(formNode) {
-            // Stats tab: refreshed every 5 s while it is the visible tab.
+            // Stats tab. "Live" shows speeds and running totals, refreshed every
+            // 5 s; the other ranges show usage from the history, refreshed
+            // every minute. Only while the Stats tab is visible.
             var stats = createStats(hints);
-            var tableBox = stats.node;
+            var usage = createUsage(hints);
+            var tableBox = E('div', {}, [ stats.node, usage.node ]);
             stats.update(data[5]);
+            var range = 'live', custom = null, lastHist = 0;
+            try { range = localStorage.getItem('nftl-range') || 'live'; } catch (e) {}
+            var fromIn = E('input', { 'type': 'datetime-local', 'class': 'cbi-input-text' });
+            var toIn = E('input', { 'type': 'datetime-local', 'class': 'cbi-input-text' });
+            var loadHistory = function() {
+                var args = [ 'history' ].concat(range === 'custom' && custom ? custom : [ range ]);
+                lastHist = Date.now();
+                return L.resolveDefault(fs.exec_direct('/usr/bin/nft-limiter', args), null)
+                    .then(function(out) { usage.render(out); });
+            };
+            var presets = [ [ 'live', _('Live') ], [ 'today', _('Today') ], [ 'yesterday', _('Yesterday') ],
+                [ '7d', _('7 days') ], [ 'period', _('This period') ], [ 'lastperiod', _('Last period') ],
+                [ 'custom', _('Custom') ] ];
+            var customBox = E('span', { 'class': 'nftl-custom' }, [
+                ' ', fromIn, ' \u2013 ', toIn, ' ',
+                E('button', { 'class': 'cbi-button cbi-button-action', 'click': function() {
+                    var f = Date.parse(fromIn.value), t = Date.parse(toIn.value);
+                    if (isNaN(f) || isNaN(t) || t <= f) return;
+                    custom = [ String(Math.floor(f / 1000)), String(Math.floor(t / 1000)) ];
+                    loadHistory();
+                } }, _('Show'))
+            ]);
+            var rangeBar = E('div', { 'class': 'nftl-rangebar' });
+            var setRange = function(r) {
+                range = r;
+                try { localStorage.setItem('nftl-range', r); } catch (e) {}
+                dom.content(rangeBar, presets.map(function(p) {
+                    return E('button', {
+                        'class': 'cbi-button' + (p[0] === range ? ' cbi-button-action' : ''),
+                        'click': function() { setRange(p[0]); }
+                    }, p[1]);
+                }).concat(range === 'custom' ? [ customBox ] : []));
+                stats.node.style.display = (range === 'live') ? '' : 'none';
+                usage.node.style.display = (range === 'live') ? 'none' : '';
+                liveNote.style.display = (range === 'live') ? '' : 'none';
+                if (range !== 'live' && (range !== 'custom' || custom)) loadHistory();
+            };
+            var liveNote = E('p', {}, _('Speeds are measured over the last few seconds; totals since the router started (they carry over rule changes and Restart, and reset on Disable or reboot). Rows covering several devices, and the global limit, expand (\u25b8) into a per-device breakdown. Tinted rows are dropping traffic right now.'));
             poll.add(function() {
                 if (!tableBox.offsetParent) return Promise.resolve();
-                return L.resolveDefault(fs.exec_direct('/usr/bin/nft-limiter', [ 'stats' ]), null)
-                    .then(function(out) { stats.update(out); });
+                if (range === 'live')
+                    return L.resolveDefault(fs.exec_direct('/usr/bin/nft-limiter', [ 'stats' ]), null)
+                        .then(function(out) { stats.update(out); });
+                if (Date.now() - lastHist > 60000 && (range !== 'custom' || custom)) return loadHistory();
+                return Promise.resolve();
             }, 5);
 
             // Settings / Stats tabs below the always-visible status block.
@@ -1010,7 +1273,8 @@ return view.extend({
                 ]),
                 E('div', { 'class': 'cbi-section', 'data-tab': 'stats', 'data-tab-title': _('Stats') }, [
                     E('h3', {}, _('Traffic Statistics')),
-                    E('p', {}, _('Speeds are measured over the last few seconds; totals since the router started (they carry over rule changes and Restart, and reset on Disable or reboot). Rows covering several devices, and the global limit, expand (\u25b8) into a per-device breakdown. Tinted rows are dropping traffic right now.')),
+                    rangeBar,
+                    liveNote,
                     tableBox
                 ])
             ]);
@@ -1055,6 +1319,15 @@ return view.extend({
                 '#cbi-nft-limiter-device tr.nftl-related,#cbi-nft-limiter-device tr.nftl-self' +
                 '{outline:1px solid rgba(0,105,214,.45);outline-offset:-1px}' +
                 '.cbi-value.nftl-merged{display:none!important}' +
+                '.nftl-rangebar{display:flex;flex-wrap:wrap;gap:.3em;align-items:center;margin:.3em 0 .6em}' +
+                '.nftl-rangebar .cbi-button{margin:0}' +
+                '.nftl-custom input{width:auto;min-width:0}' +
+                '.nftl-range-label{color:#888}' +
+                '.nftl-spark svg{display:block;fill:var(--primary-color-high,#0069d6);opacity:.75}' +
+                '.nftl-qbar{width:12em;max-width:100%;height:8px;border-radius:4px;background:rgba(127,127,127,.25);overflow:hidden}' +
+                '.nftl-qfill{height:100%;background:var(--primary-color-high,#0069d6)}' +
+                '.nftl-qfill.nftl-qfull{background:#d9534f}' +
+                '.nftl-qtext{font-size:11px;color:#888;margin-top:.15em}' +
                 '.nftl-stats .nftl-expand{display:inline-block;width:1.2em;cursor:pointer;color:#888}' +
                 '.nftl-stats .nftl-sub .td{font-size:12px;color:#777}' +
                 '.nftl-stats .nftl-sub .td:first-child{padding-left:2.2em}' +
@@ -1107,6 +1380,7 @@ return view.extend({
             });
             var root = E('div', {}, [ gridCss, status, tabs, buildFooter() ]);
             ui.tabs.initTabGroup(tabs.childNodes);
+            setRange(range);
             return root;
         });
     },

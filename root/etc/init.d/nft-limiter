@@ -4,6 +4,9 @@
 #
 
 START=99
+# STOP makes 'enable' add a shutdown link, so stop runs at shutdown and
+# saves the usage history to flash.
+STOP=10
 USE_PROCD=1
 
 NAME=nft-limiter
