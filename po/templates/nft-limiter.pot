@@ -373,7 +373,7 @@ msgstr ""
 msgid "Billing Period Starts On Day"
 msgstr ""
 
-msgid "Day of the month (1-28) your ISP starts a new billing period. Used by the Stats ranges \"This period\" / \"Last period\" and by per-period quotas."
+msgid "Day of the month (1-31) your ISP starts a new billing period; in shorter months, the last day. Used by the Stats ranges \"This period\" / \"Last period\" and by per-period quotas."
 msgstr ""
 
 msgid "Quota (GB)"

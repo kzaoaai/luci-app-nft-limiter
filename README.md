@@ -41,7 +41,8 @@ Then open **LuCI → Network → NFT Limiter**.
 ```
 config nft-limiter
     option enabled   1            # master service on/off
-    option period_day 1           # day of the month the ISP billing period starts
+    option period_day 1           # day (1-31) the ISP billing period starts; shorter
+                                  # months use their last day
     option iface     'wan'        # interface(s) to rate-limit (space-separated). Include
                                   # every uplink (failover WAN, VPN tunnels that carry
                                   # policy-routed traffic): traffic leaving through an

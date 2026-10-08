@@ -810,24 +810,36 @@ snapshot() {
     return 0
 }
 
-# _period_start [prev] -- epoch of the current (or previous) billing period
-#   start: day period_day (1-28, default 1) of the month, local midnight.
-_period_start() {
-    local pd y m d
+# _period_day <year> <month> -- the billing period's start day in that
+#   month: period_day (1-31, default 1), or the month's last day when it
+#   has fewer days (a period on the 31st starts on 30 April, 28 February).
+_period_day() {
+    local pd last
     pd=$(uci -q get "${NAME}.@${NAME}[0].period_day"); pd=${pd:-1}
+    last=$(awk -v y="$1" -v m="$2" 'BEGIN { split("31 28 31 30 31 30 31 31 30 31 30 31", d, " ")
+        n = d[m]; if (m == 2 && ((y % 4 == 0 && y % 100 != 0) || y % 400 == 0)) n = 29; print n }')
+    [ "$pd" -gt "$last" ] && pd=$last
+    echo "$pd"
+}
+
+# _period_start [prev] -- epoch of the current (or previous) billing period
+#   start: local midnight of _period_day in the right month.
+_period_start() {
+    local y m d pd
     y=$(date +%Y); m=$(date +%m); d=$(date +%d)
     m=${m#0}; d=${d#0}
+    pd=$(_period_day "$y" "$m")
     [ "$d" -lt "$pd" ] && { m=$(( m - 1 )); [ "$m" -lt 1 ] && { m=12; y=$(( y - 1 )); }; }
     [ "$1" = prev ] && { m=$(( m - 1 )); [ "$m" -lt 1 ] && { m=12; y=$(( y - 1 )); }; }
-    date -d "$(printf '%04d-%02d-%02d 00:00' "$y" "$m" "$pd")" +%s
+    date -d "$(printf '%04d-%02d-%02d 00:00' "$y" "$m" "$(_period_day "$y" "$m")")" +%s
 }
 
 # _quota_rollover -- at the first snapshot of a new local day, reset the
 #   daily quotas, and the billing-period ones when a period starts today.
 #   (Up to one snapshot interval, ~11 min, after midnight.)
 _quota_rollover() {
-    local name idx per pd today
-    pd=$(uci -q get "${NAME}.@${NAME}[0].period_day"); pd=${pd:-1}
+    local name idx per pd today m
+    m=$(date +%m); pd=$(_period_day "$(date +%Y)" "${m#0}")
     today=$(date +%d); today=${today#0}
     for name in $(_list_objects quota); do
         idx="${name#${OBJ_PREFIX}q_}"

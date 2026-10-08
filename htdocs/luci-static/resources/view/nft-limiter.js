@@ -778,8 +778,8 @@ return view.extend({
         o.onchange = function(ev, section_id, value) { updateUplinkWarn(value); };
 
         o = s.option(form.Value, 'period_day', _('Billing Period Starts On Day'),
-            _('Day of the month (1-28) your ISP starts a new billing period. Used by the Stats ranges "This period" / "Last period" and by per-period quotas.'));
-        o.datatype = 'range(1,28)';
+            _('Day of the month (1-31) your ISP starts a new billing period; in shorter months, the last day. Used by the Stats ranges "This period" / "Last period" and by per-period quotas.'));
+        o.datatype = 'range(1,31)';
         o.placeholder = '1';
 
         // Toggle for the global default (catch-all) limit, backed by a real UCI
