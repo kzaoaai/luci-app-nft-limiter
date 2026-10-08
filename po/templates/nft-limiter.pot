@@ -64,12 +64,6 @@ msgstr ""
 msgid "Device (IP / Range)"
 msgstr ""
 
-msgid "IP, CIDR, or IP range (a.b.c.d-e.f.g.h)"
-msgstr ""
-
-msgid "Enter an IP, CIDR, or IPv4 range (a.b.c.d-e.f.g.h)"
-msgstr ""
-
 msgid "Down (Mbit/s)"
 msgstr ""
 
@@ -262,9 +256,6 @@ msgstr ""
 msgid "always"
 msgstr ""
 
-msgid "Rules for these addresses, in checking order (first match wins):"
-msgstr ""
-
 msgid "this row"
 msgstr ""
 
@@ -281,4 +272,16 @@ msgid "Global Schedule"
 msgstr ""
 
 msgid "Not rate-limited: %s. Traffic routed out through these uplinks (e.g. failover, or policy-routed VPN) skips every limit and block."
+msgstr ""
+
+msgid "Pick devices, or type an IP / CIDR / range"
+msgstr ""
+
+msgid "Not an IP, CIDR, or IPv4 range: %s"
+msgstr ""
+
+msgid "Multiple rules for %s:"
+msgstr ""
+
+msgid "Multiple rules for this entry:"
 msgstr ""

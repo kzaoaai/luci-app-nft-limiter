@@ -81,6 +81,13 @@ function intToIp4(n) {
     return [ n >>> 24, (n >>> 16) & 255, (n >>> 8) & 255, n & 255 ].join('.');
 }
 
+// A rule's targets as an array: UCI lists come back as arrays, older
+// single-value configs as a string (possibly space-separated).
+function toList(v) {
+    if (Array.isArray(v)) return v.filter(function(x) { return x; });
+    return String(v || '').trim().split(/\s+/).filter(function(x) { return x; });
+}
+
 // IPv4 address span [lo, hi] of a target (host, CIDR or range), or null
 // for IPv6 / unparseable targets.
 function ip4Span(t) {
@@ -115,54 +122,77 @@ function describeRule(dev) {
         if (dev.week && dev.week !== '0')
             when += ' ' + dev.week.split(',').map(function(d) { return DAY_NAMES[d] || d; }).join(',');
     }
-    var name = dev.comment ? (dev.comment + ' (' + dev.target + ')') : dev.target;
+    var t = toList(dev.target).join(', ');
+    var name = dev.comment ? (dev.comment + ' (' + t + ')') : t;
     return name + ': ' + what + ', ' + when;
 }
 
 // For each enabled row that other enabled rows also match (same addresses,
-// or a broader target containing it), the full list of rules for those
-// addresses in the engine's checking order: fewest addresses first, then
-// scheduled before always-on, then list order. The first match wins, and
-// an always-on rule always matches, so everything after it is never reached.
-// Returns { sid: { text, dead } }; dead = this row itself is never reached.
+// or a broader target containing them), the rules for those addresses in
+// the engine's checking order: fewest addresses first (a list counts the
+// total of its members), then scheduled before always-on, then list order.
+// The first match wins, and an always-on rule always matches, so everything
+// after it is never reached. A row with several targets gets one list per
+// target that another rule also matches. Returns
+// { sid: { text, dead, related } }; dead = no part of this row is ever
+// reached; related = the other rows listed.
 function coverageMap(devs) {
     var rows = [];
     devs.forEach(function(dev, idx) {
-        if (dev.enable === '0' || !dev.target) return;
-        var span = ip4Span(dev.target);
-        rows.push({
-            dev: dev, idx: idx, span: span,
-            v6: span ? null : String(dev.target).trim().toLowerCase(),
-            size: span ? span[1] - span[0] + 1 : Infinity,
-            always: !hasSchedule(dev)
+        if (dev.enable === '0') return;
+        var members = toList(dev.target).map(function(t) {
+            var span = ip4Span(t);
+            return { t: t, span: span, v6: span ? null : t.toLowerCase() };
         });
+        if (!members.length) return;
+        var size = 0;
+        members.forEach(function(m) { size += m.span ? m.span[1] - m.span[0] + 1 : Infinity; });
+        rows.push({ dev: dev, idx: idx, members: members, size: size, always: !hasSchedule(dev) });
     });
     var order = function(a, b) {
-        if (a.size !== b.size) return a.size - b.size;
+        if (a.size !== b.size) return (a.size < b.size) ? -1 : 1;
         if (a.always !== b.always) return a.always ? 1 : -1;
         return a.idx - b.idx;
     };
+    var covers = function(row, m) {
+        return row.members.some(function(o) {
+            return (m.span && o.span) ? (o.span[0] <= m.span[0] && o.span[1] >= m.span[1])
+                                      : (!!m.v6 && m.v6 === o.v6);
+        });
+    };
     var out = {};
     rows.forEach(function(r) {
-        var chain = rows.filter(function(o) {
-            if (o === r) return true;
-            return (r.span && o.span) ? (o.span[0] <= r.span[0] && o.span[1] >= r.span[1])
-                                      : (!!r.v6 && r.v6 === o.v6);
-        }).sort(order);
-        if (chain.length < 2) return;
-        var lines = [ _('Rules for these addresses, in checking order (first match wins):') ];
-        var reached = true, dead = false;
-        chain.forEach(function(o, i) {
-            var line = (i + 1) + '. ' + describeRule(o.dev);
-            if (o === r) line += '  \u2190 ' + _('this row');
-            if (!reached) {
-                line += '  (' + _('never reached') + ')';
-                if (o === r) dead = true;
-            }
-            lines.push(line);
-            if (o.always) reached = false;
+        var lines = [], anyReached = false, anyShown = false, related = [];
+        r.members.forEach(function(m) {
+            var chain = rows.filter(function(o) { return o === r || covers(o, m); }).sort(order);
+            var reached = true, mine = true;
+            chain.forEach(function(o) {
+                if (o === r) mine = reached;
+                if (o.always) reached = false;
+            });
+            if (mine) anyReached = true;
+            if (chain.length < 2) return;
+            chain.forEach(function(o) {
+                if (o !== r && related.indexOf(o.dev['.name']) < 0) related.push(o.dev['.name']);
+            });
+            anyShown = true;
+            if (lines.length) lines.push('');
+            // Listed in checking order: the first that matches wins. "#n"
+            // rather than "n." since the addresses themselves contain dots.
+            lines.push(r.members.length > 1
+                ? _('Multiple rules for %s:').format(m.t)
+                : _('Multiple rules for this entry:'));
+            reached = true;
+            chain.forEach(function(o, i) {
+                var line = '#' + (i + 1) + ' ' + describeRule(o.dev);
+                if (o === r) line += '  \u2190 ' + _('this row');
+                if (!reached) line += '  (' + _('never reached') + ')';
+                lines.push(line);
+                if (o.always) reached = false;
+            });
         });
-        out[r.dev['.name']] = { text: lines.join('\n'), dead: dead };
+        if (anyShown)
+            out[r.dev['.name']] = { text: lines.join('\n'), dead: !anyReached, related: related };
     });
     return out;
 }
@@ -223,7 +253,12 @@ function parseCounters(jsonStr) {
             if (!r || !r.comment || !Array.isArray(r.expr)) return;
             var c = null;
             r.expr.forEach(function(e) { if (e && e.counter) c = e.counter; });
-            if (c) map[r.comment] = { packets: c.packets || 0, bytes: c.bytes || 0 };
+            if (!c) return;
+            // Several rules can share a comment (one per IPv6 member of a
+            // list); add them up.
+            var m = map[r.comment] || (map[r.comment] = { packets: 0, bytes: 0 });
+            m.packets += c.packets || 0;
+            m.bytes += c.bytes || 0;
         });
         return map;
     } catch (e) {
@@ -249,7 +284,7 @@ function cell(counters, comment) {
 function statsRows(counters) {
     var rows = [];
     uci.sections('nft-limiter', 'device').forEach(function(dev, idx) {
-        var target = dev.target || '—';
+        var target = toList(dev.target).join(', ') || '—';
         var label = dev.comment ? (dev.comment + ' — ' + target) : target;
         if (dev.enable === '0') label += ' ' + _('(disabled)');
         else if (dev.block === '1') label += ' ' + _('(blocked)');
@@ -563,14 +598,18 @@ return view.extend({
             return rows;
         };
 
-        o = s.option(form.Value, 'target', _('Device (IP / Range)'));
+        // Targets: tick any mix of networks and devices, or type an IP, CIDR
+        // or range (custom entry). All of a row's targets share its limit.
+        o = s.option(form.MultiValue, 'target', _('Device (IP / Range)'));
         o.width = '22%';
         o.rmempty   = false;
         o.editable  = true;
-        o.placeholder = _('IP, CIDR, or IP range (a.b.c.d-e.f.g.h)');
+        o.create    = true;
+        o.placeholder = _('Pick devices, or type an IP / CIDR / range');
         o.validate = function(section_id, value) {
-            if (validateTarget(value)) return true;
-            return _('Enter an IP, CIDR, or IPv4 range (a.b.c.d-e.f.g.h)');
+            var bad = toList(value).filter(function(t) { return !validateTarget(t); });
+            if (!bad.length) return true;
+            return _('Not an IP, CIDR, or IPv4 range: %s').format(bad.join(', '));
         };
         var namedDevices = [], unnamedDevices = [];
         var macByIp4 = {};
@@ -609,13 +648,12 @@ return view.extend({
         });
         namedDevices.concat(unnamedDevices).forEach(function(d) { o.value(d.val, deviceLabel(d.label, d.ip)); });
         o.textvalue = function(section_id) {
-            var val = this.cfgvalue(section_id);
-            if (!val) return '';
-            if (netNames[val]) return netNames[val] + ' \u2014 ' + val;
-            var name = hints.getHostnameByIPAddr(val)
-                    || hints.getHostnameByIP6Addr(val);
-            if (name) return name + ' \u2014 ' + val;
-            return val;
+            return toList(this.cfgvalue(section_id)).map(function(val) {
+                if (netNames[val]) return netNames[val] + ' \u2014 ' + val;
+                var name = hints.getHostnameByIPAddr(val)
+                        || hints.getHostnameByIP6Addr(val);
+                return name ? (name + ' \u2014 ' + val) : val;
+            }).join(', ');
         };
 
         // Block: drop all of the device's WAN traffic (both directions, IPv4
@@ -688,10 +726,14 @@ return view.extend({
         // target edited in this save is seen.
         this.fillMacs = function() {
             uci.sections('nft-limiter', 'device').forEach(function(dev) {
-                var t = String(dev.target || '').trim();
-                var mac = isIp4(t) ? macByIp4[t] : null;
-                if (mac) {
-                    if (dev.mac !== mac) uci.set('nft-limiter', dev['.name'], 'mac', mac);
+                var macs = [];
+                toList(dev.target).forEach(function(t) {
+                    var mac = isIp4(t) ? macByIp4[t] : null;
+                    if (mac && macs.indexOf(mac) < 0) macs.push(mac);
+                });
+                if (macs.length) {
+                    if (toList(dev.mac).join(' ') !== macs.join(' '))
+                        uci.set('nft-limiter', dev['.name'], 'mac', macs);
                 } else if (dev.mac) {
                     uci.unset('nft-limiter', dev['.name'], 'mac');
                 }
@@ -705,11 +747,24 @@ return view.extend({
         //   - Global Settings descriptions become "?" hints on their labels;
         //   - the Per-Device Rules heading gets its "?" hint and the live
         //     count of devices with loaded rules.
-        // Hint popup: the "?" hints and coverage dots show their text in a
+        // Hint popup: the "?" hints and coverage "i" badges show their text in a
         // small popup on click/tap, since touch browsers (iOS Safari) never
         // show title tooltips. Tapping elsewhere or the same icon closes it.
         var tip = null;
-        var closeTip = function() { if (tip) { tip.remove(); tip = null; } };
+        // A coverage badge's popup also highlights its row and the related
+        // rows in the grid until the popup closes.
+        var setHighlight = function(sids, on) {
+            (sids || []).forEach(function(sid, i) {
+                var tr = document.querySelector('#cbi-nft-limiter-device tr[data-section-id="' + sid + '"]');
+                if (tr) tr.classList.toggle(i ? 'nftl-related' : 'nftl-self', on);
+            });
+        };
+        var closeTip = function() {
+            if (!tip) return;
+            setHighlight(tip.anchor.highlight, false);
+            tip.remove();
+            tip = null;
+        };
         document.addEventListener('click', function(ev) {
             if (tip && !tip.contains(ev.target)) closeTip();
         });
@@ -721,6 +776,7 @@ return view.extend({
             closeTip();
             tip = E('div', { 'class': 'nftl-tip' }, anchor.getAttribute('title'));
             tip.anchor = anchor;
+            setHighlight(anchor.highlight, true);
             document.body.appendChild(tip);
             var r = anchor.getBoundingClientRect();
             var maxLeft = document.documentElement.clientWidth - tip.offsetWidth - 8;
@@ -750,7 +806,7 @@ return view.extend({
                 if (text) l.append(' ', helpHint(text));
             });
 
-            // Coverage dot at the start of each covered row's Device cell:
+            // Coverage "i" badge at the start of each covered row's Device cell:
             // blue = also matched by another rule (details on hover),
             // orange = shadowed, this row can never apply.
             var ifaceField = mapEl.querySelector('#cbi-nft-limiter-nft-limiter .cbi-value[data-name="iface"] .cbi-value-field');
@@ -763,13 +819,16 @@ return view.extend({
                 if (!cell) return;
                 var old = cell.querySelector('.nftl-cover');
                 if (old) old.remove();
-                var c = cover[tr.getAttribute('data-section-id')];
+                var sid = tr.getAttribute('data-section-id');
+                var c = cover[sid];
                 if (!c) return;
-                cell.insertBefore(E('span', {
+                var badge = E('span', {
                     'class': 'nftl-cover' + (c.dead ? ' nftl-dead' : ''),
                     'title': c.text,
                     'click': toggleTip
-                }), cell.firstChild);
+                }, 'i');
+                badge.highlight = [ sid ].concat(c.related);
+                cell.insertBefore(badge, cell.firstChild);
             });
 
             // Global limit and schedule fields share a row each: the other
@@ -859,9 +918,26 @@ return view.extend({
                 '-webkit-mask-image:var(--nftl-icon);-webkit-mask-size:cover}' +
                 '#cbi-nft-limiter-device td[data-name="target"] > div' +
                 '{display:flex;align-items:center;gap:.35em}' +
-                '.nftl-cover{flex:none;width:9px;height:9px;border-radius:50%;cursor:help;' +
-                'background:var(--primary-color-high,#0069d6)}' +
+                // Device column: keep its set width (max-width:0 lets a
+                // percentage-width cell stop growing to fit its content) and
+                // stack a multi-device row's picks one per line, so the
+                // other columns keep their room.
+                '#cbi-nft-limiter-device td[data-name="target"]{max-width:0}' +
+                '#cbi-nft-limiter-device td[data-name="target"] .cbi-dropdown:not(.btn):not(.cbi-button)' +
+                '{height:auto;min-height:30px}' +
+                '#cbi-nft-limiter-device td[data-name="target"] .cbi-dropdown > ul:not(.dropdown)' +
+                '{flex-direction:column;min-width:0}' +
+                '#cbi-nft-limiter-device td[data-name="target"] .cbi-dropdown > ul:not(.dropdown) > li[display]' +
+                '{display:block!important;align-self:stretch;min-width:0;border-left:none;' +
+                'text-align:left;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}' +
+                '.nftl-cover{flex:none;width:15px;height:15px;border-radius:50%;cursor:help;' +
+                'background:var(--primary-color-high,#0069d6);color:#fff;font:italic bold 11px/15px Georgia,serif;' +
+                'text-align:center;user-select:none}' +
                 '.nftl-cover.nftl-dead{background:#f0ad4e}' +
+                '#cbi-nft-limiter-device tr.nftl-related > .td{background:rgba(0,105,214,.10)!important}' +
+                '#cbi-nft-limiter-device tr.nftl-self > .td{background:rgba(0,105,214,.22)!important}' +
+                '#cbi-nft-limiter-device tr.nftl-related,#cbi-nft-limiter-device tr.nftl-self' +
+                '{outline:1px solid rgba(0,105,214,.45);outline-offset:-1px}' +
                 '.cbi-value.nftl-merged{display:none!important}' +
                 '.nftl-warn{margin-top:.4em;padding:.35em .6em;border-radius:4px;max-width:40em;' +
                 'font-size:12px;line-height:1.4;background:rgba(240,173,78,.15);' +
@@ -876,7 +952,7 @@ return view.extend({
                 //  - Enabled and Block share the first line, then Device,
                 //    then the row buttons; the other fields are hidden
                 //    (Edit shows them all);
-                //  - the coverage dot sits beside the "Device" label, bigger
+                //  - the coverage badge sits beside the "Device" label, bigger
                 //    for touch, instead of at the screen edge.
                 '@media screen and (max-device-width:600px){' +
                 '#cbi-nft-limiter-device .td[data-name="download"],' +
@@ -887,18 +963,18 @@ return view.extend({
                 '#cbi-nft-limiter-device .td[data-name="comment"]{display:none}' +
                 '#cbi-nft-limiter-device .td[data-name="enable"]{order:1}' +
                 '#cbi-nft-limiter-device .td[data-name="block"]{order:2}' +
-                '#cbi-nft-limiter-device .td[data-name="target"]{order:3;display:flex;' +
+                '#cbi-nft-limiter-device .td[data-name="target"]{order:3;max-width:none;display:flex;' +
                 'flex-wrap:wrap;align-items:center;column-gap:.5em}' +
                 '#cbi-nft-limiter-device .td[data-name="target"]::before{flex:0 1 auto}' +
                 '#cbi-nft-limiter-device .td[data-name="target"] > div{display:contents}' +
                 '#cbi-nft-limiter-device .td[data-name="target"] .cbi-dropdown{flex:1 1 100%}' +
                 '#cbi-nft-limiter-device .td.cbi-section-actions{order:4}' +
-                '.nftl-cover{width:14px;height:14px}' +
+                '.nftl-cover{width:18px;height:18px;font-size:13px;line-height:18px}' +
                 '}' +
                 '.nftl-tip{position:absolute;z-index:1000;max-width:min(26em,calc(100vw - 16px));' +
                 'padding:.5em .7em;border:1px solid rgba(127,127,127,.4);border-radius:4px;' +
                 'background:var(--background-color-high,#fff);color:var(--text-color-highest,#333);' +
-                'box-shadow:0 2px 8px rgba(0,0,0,.2);font-size:12px;font-weight:normal;' +
+                'box-shadow:0 2px 8px rgba(0,0,0,.2);font-size:13px;font-weight:normal;' +
                 'line-height:1.45;white-space:pre-line;text-align:left}' +
                 '.nftl-count,.nftl-sub{font-size:13px;font-weight:normal;color:#888;' +
                 'margin-left:.6em;vertical-align:middle}'

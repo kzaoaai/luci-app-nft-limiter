@@ -13,7 +13,8 @@ Fast, minimal-CPU per-device bandwidth control for OpenWrt using native **nftabl
 
 - **Native nftables rules** — `limit rate over … drop` policing, near-zero CPU overhead
 - **Selectable Interfaces** — Select interface(s) where traffic is shaped (wan, wan2, VPN, etc...)
-- **Flexible targets** — single IP, CIDR subnet, or arbitrary IP range (`192.168.1.10-192.168.1.50`), with a device picker populating existing devices and hostnames
+- **Flexible targets** — single IP, CIDR subnet, IP range (`192.168.1.10-192.168.1.50`), or any mix of them in one rule (multi-select picker with your devices, hostnames and LAN/VLAN subnets); all of a rule's targets share its one limit
+- **Overlap hints** — an "i" badge on rules that other rules also match, listing them in checking order and highlighting them in the grid
 - **Block toggle** — drop a device's WAN traffic outright (both directions), optionally on its schedule
 - **IPv6 aware** — a single-IPv4 device with a known MAC is also matched on IPv6 (upload by MAC, download by its learned global addresses), sharing one limit across both families; IPv6 addresses and prefixes work as targets too
 - **Time scheduling** — time-of-day and day-of-week windows, both per-rule and for the global default limit
@@ -53,7 +54,8 @@ config nft-limiter
 
 config device
     option enable    1
-    option target    192.168.1.10          # IP, CIDR, or IP range
+    option target    192.168.1.10          # IP, CIDR, IP range, or a list of these
+                                           # (list target ...), sharing one limit
     option download  40
     option upload    10
     option timestart 08:00

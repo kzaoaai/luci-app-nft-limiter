@@ -6,6 +6,9 @@
 #   CIDR  : 192.168.1.0/24             -> ip daddr/saddr
 #   IP    : 192.168.1.50               -> ip daddr/saddr
 #   IPv6  : 2001:db8::5, 2001:db8::/64 -> ip6 daddr/saddr
+#   List  : any mix of the above (UCI list, or space-separated) -> one
+#           rule per family matching an anonymous set, so every member
+#           shares the row's single limit, like a range or subnet does.
 #
 # IPv6 coverage for IPv4 hosts: a single-IPv4 target whose MAC is known
 # (UCI 'mac', a static DHCP host, the DHCP lease file, or the neighbour
@@ -188,12 +191,17 @@ _dir_lines() {
 #   Uses global $_iface_set for interface scoping.
 # -----------------------------------------------------------------------
 _rule_lines() {
-    local idx="$1" target="$2" dl_kb="$3" ul_kb="$4" block="$5" mac="$6"
+    local idx="$1" targets="$2" dl_kb="$3" ul_kb="$4" block="$5" macs="$6"
     local time_expr="$7" day_expr="$8"
-    local prefix="" fam="ip" kb
+    local prefix="" kb t v4="" v6="" mac set
     [ -n "$time_expr" ] && prefix="${time_expr} "
     [ -n "$day_expr"  ] && prefix="${prefix}${day_expr} "
-    case "$target" in *:*) fam="ip6" ;; esac
+    for t in $targets; do
+        case "$t" in
+            *:*) v6="${v6:+$v6, }$t" ;;
+            *)   v4="${v4:+$v4, }$t" ;;
+        esac
+    done
 
     if [ "$block" != "1" ]; then
         for kb in "dl $dl_kb" "ul $ul_kb"; do
@@ -204,19 +212,37 @@ _rule_lines() {
         done
     fi
 
-    local in_if="meta iifname { ${_iface_set} }" out_if="meta oifname { ${_iface_set} }"
-    _dir_lines "${idx}_dl" "$in_if $fam daddr $target" "$prefix" "$dl_kb" "$block" "${OBJ_PREFIX}${idx}_dl"
-    _dir_lines "${idx}_ul" "$out_if $fam saddr $target" "$prefix" "$ul_kb" "$block" "${OBJ_PREFIX}${idx}_ul"
+    # One member matches as itself, several as an anonymous set (nft adds
+    # the interval flag itself when ranges or prefixes are present).
+    case "$v4" in *,*) v4="{ $v4 }" ;; esac
+    case "$v6" in *,*) v6="{ $v6 }" ;; esac
 
-    [ -n "$mac" ] || return 0
-    local set="${OBJ_PREFIX}v6_$(echo "$mac" | tr -d ':')"
-    local mac6="ether saddr $mac meta nfproto ipv6"
-    printf '    set %s { type ipv6_addr; flags dynamic, timeout; timeout 1h; size 64; }\n' \
-        "$set" >> "$_obj_file"
-    printf '        %s %s ip6 saddr != fe80::/10 update @%s { ip6 saddr } comment "dev_%s_learn6"\n' \
-        "$out_if" "$mac6" "$set" "$idx" >> "$_learn_file"
-    _dir_lines "${idx}_dl6" "$in_if ip6 daddr @$set" "$prefix" "$dl_kb" "$block" "${OBJ_PREFIX}${idx}_dl"
-    _dir_lines "${idx}_ul6" "$out_if $mac6" "$prefix" "$ul_kb" "$block" "${OBJ_PREFIX}${idx}_ul"
+    local in_if="meta iifname { ${_iface_set} }" out_if="meta oifname { ${_iface_set} }"
+    local ldl="${OBJ_PREFIX}${idx}_dl" lul="${OBJ_PREFIX}${idx}_ul"
+    if [ -n "$v4" ]; then
+        _dir_lines "${idx}_dl" "$in_if ip daddr $v4" "$prefix" "$dl_kb" "$block" "$ldl"
+        _dir_lines "${idx}_ul" "$out_if ip saddr $v4" "$prefix" "$ul_kb" "$block" "$lul"
+    fi
+    if [ -n "$v6" ]; then
+        _dir_lines "${idx}_dl6" "$in_if ip6 daddr $v6" "$prefix" "$dl_kb" "$block" "$ldl"
+        _dir_lines "${idx}_ul6" "$out_if ip6 saddr $v6" "$prefix" "$ul_kb" "$block" "$lul"
+    fi
+
+    # IPv6 companions for IPv4 hosts with a known MAC: one learned-address
+    # set per MAC, all sharing the row's limits.
+    [ -n "$macs" ] || return 0
+    for mac in $macs; do
+        set="${OBJ_PREFIX}v6_$(echo "$mac" | tr -d ':')"
+        printf '    set %s { type ipv6_addr; flags dynamic, timeout; timeout 1h; size 64; }\n' \
+            "$set" >> "$_obj_file"
+        printf '        %s ether saddr %s meta nfproto ipv6 ip6 saddr != fe80::/10 update @%s { ip6 saddr } comment "dev_%s_learn6"\n' \
+            "$out_if" "$mac" "$set" "$idx" >> "$_learn_file"
+        _dir_lines "${idx}_dl6" "$in_if ip6 daddr @$set" "$prefix" "$dl_kb" "$block" "$ldl"
+    done
+    local macset
+    macset=$(echo $macs | sed 's/ /, /g')
+    case "$macset" in *,*) macset="{ $macset }" ;; esac
+    _dir_lines "${idx}_ul6" "$out_if ether saddr $macset meta nfproto ipv6" "$prefix" "$ul_kb" "$block" "$lul"
 }
 
 # -----------------------------------------------------------------------
@@ -294,8 +320,11 @@ _collect_dev() {
     config_get week "$cfg" week
     _time_and_day_expr "$ts" "$te" "$week"
     [ -n "$_time_expr$_day_expr" ] && always=0
+    # A list's specificity is the total of its members' address counts.
+    local t count=0
+    for t in $target; do count=$(( count + $(_target_addr_count "$t") )); done
     [ -n "$target" ] && \
-        printf '%s\t%s\t%s\n' "$(_target_addr_count "$target")" "$always" "$_cfg_idx" >> "$_order_list"
+        printf '%s\t%s\t%s\n' "$count" "$always" "$_cfg_idx" >> "$_order_list"
     _cfg_idx=$((_cfg_idx + 1))
 }
 
@@ -305,7 +334,7 @@ _collect_dev() {
 # -----------------------------------------------------------------------
 _emit_device() {
     local idx="$1"
-    local target download upload block mac timestart timeend week dl_kb ul_kb
+    local target download upload block mac timestart timeend week dl_kb ul_kb t m macs=""
     target=$(uci -q get "${NAME}.@device[${idx}].target")
     [ -z "$target" ] && return 0
     download=$(uci  -q get "${NAME}.@device[${idx}].download")
@@ -317,14 +346,19 @@ _emit_device() {
     week=$(uci      -q get "${NAME}.@device[${idx}].week")
     dl_kb=$(_mbit_to_kb "$download")
     ul_kb=$(_mbit_to_kb "$upload")
-    # IPv6 companion rules only for a single IPv4 host with a known MAC.
-    if _ip4_to_int "$target" >/dev/null; then
-        mac=$(_resolve_mac "$target" "$mac")
-    else
-        mac=""
-    fi
+    # IPv6 companion rules for the row's single-IPv4 members whose MAC is
+    # known: the MACs LuCI saved ('mac' list), plus any resolved now.
+    for m in $mac; do
+        case " $macs " in *" $m "*) ;; *) macs="${macs:+$macs }$m" ;; esac
+    done
+    for t in $target; do
+        _ip4_to_int "$t" >/dev/null || continue
+        m=$(_resolve_mac "$t" "")
+        [ -n "$m" ] || continue
+        case " $macs " in *" $m "*) ;; *) macs="${macs:+$macs }$m" ;; esac
+    done
     _time_and_day_expr "$timestart" "$timeend" "$week"
-    _rule_lines "$idx" "$target" "$dl_kb" "$ul_kb" "${block:-0}" "$mac" "$_time_expr" "$_day_expr"
+    _rule_lines "$idx" "$target" "$dl_kb" "$ul_kb" "${block:-0}" "$macs" "$_time_expr" "$_day_expr"
 }
 
 # -----------------------------------------------------------------------
