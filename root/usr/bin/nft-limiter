@@ -49,7 +49,7 @@ HIST_DIR="/var/run/nft-limiter-hist"
 HIST_SAVE="/etc/nft-limiter.hist.tgz"
 HIST_FINE_DAYS=7
 HIST_HOURLY_DAYS=45
-HIST_DAILY_DAYS=400
+HIST_DAILY_DAYS=400   # default; the "Keep history for (months)" setting overrides
 # UTC offset at the last build; the ntp hotplug hook rebuilds on a change.
 TZOFF_FILE="/var/run/nft-limiter.tzoff"
 OBJ_PREFIX="nftlim_"
@@ -99,6 +99,14 @@ _ip4_to_int() {
 # -----------------------------------------------------------------------
 _mbit_to_kb() {
     awk -v v="${1:-0}" 'BEGIN { k = v * 125; if (v > 0 && k < 1) k = 1; printf "%.0f", k }'
+}
+
+# _burst <kbytes/s> -- the limit's burst: <rate> x the "burst" setting in
+#   seconds (default 2), at least 1 kbyte.
+_burst() {
+    local b
+    b=$(uci -q get "${NAME}.@${NAME}[0].burst")
+    awk -v k="$1" -v s="${b:-2}" 'BEGIN { v = k * s; if (v < 1) v = 1; printf "%.0f", v }'
 }
 
 # -----------------------------------------------------------------------
@@ -314,7 +322,7 @@ _rule_lines() {
             set -- $kb
             [ "$2" -gt 0 ] 2>/dev/null && \
                 printf '    limit %s%s_%s { rate over %s kbytes/second burst %s kbytes }\n' \
-                    "$OBJ_PREFIX" "$idx" "$1" "$2" "$(( $2 * 2 ))" >> "$_obj_file"
+                    "$OBJ_PREFIX" "$idx" "$1" "$2" "$(_burst "$2")" >> "$_obj_file"
         done
     fi
 
@@ -390,13 +398,13 @@ _catch_all_lines() {
         printf '        meta oifname { %s } %supdate @%s_ul6 { ip6 saddr } comment "default_acct"\n' "$_iface_set" "$prefix" "$a"
     fi
     if [ "$dl_kb" -gt 0 ] 2>/dev/null; then
-        local dl_burst=$((dl_kb * 2))
+        local dl_burst; dl_burst=$(_burst "$dl_kb")
         _counter dl
         printf '        meta iifname { %s } %slimit rate over %s kbytes/second burst %s kbytes %s drop comment "default_dl"\n' \
             "$_iface_set" "$prefix" "$dl_kb" "$dl_burst" "$_ctr"
     fi
     if [ "$ul_kb" -gt 0 ] 2>/dev/null; then
-        local ul_burst=$((ul_kb * 2))
+        local ul_burst; ul_burst=$(_burst "$ul_kb")
         _counter ul
         printf '        meta oifname { %s } %slimit rate over %s kbytes/second burst %s kbytes %s drop comment "default_ul"\n' \
             "$_iface_set" "$prefix" "$ul_kb" "$ul_burst" "$_ctr"
@@ -512,7 +520,7 @@ _emit_device() {
             qrate=$(_mbit_to_kb "${qrate:-1}")
             for t in dl ul; do
                 printf '    limit %sqlim_%s_%s { rate over %s kbytes/second burst %s kbytes }\n' \
-                    "$OBJ_PREFIX" "$idx" "$t" "$qrate" "$(( qrate * 2 ))" >> "$_obj_file"
+                    "$OBJ_PREFIX" "$idx" "$t" "$qrate" "$(_burst "$qrate")" >> "$_obj_file"
             done
         fi
     fi
@@ -767,12 +775,20 @@ _prune() {
     echo "$cut" > "$3"
 }
 
+# With "Save history to flash" off, the history stays in RAM only (lost at
+# reboot) and any earlier flash copy is removed.
+_hist_save_enabled() {
+    [ "$(uci -q get "${NAME}.@${NAME}[0].hist_save")" != 0 ]
+}
+
 _hist_save() {
+    _hist_save_enabled || { rm -f "$HIST_SAVE"; return 0; }
     [ -d "$HIST_DIR" ] || return 0
     tar -czf "${HIST_SAVE}.new" -C "$HIST_DIR" . 2>/dev/null && mv "${HIST_SAVE}.new" "$HIST_SAVE"
 }
 
 _hist_restore() {
+    _hist_save_enabled || return 0
     [ -d "$HIST_DIR" ] && return 0
     [ -f "$HIST_SAVE" ] || return 0
     mkdir -p "$HIST_DIR" && tar -xzf "$HIST_SAVE" -C "$HIST_DIR" 2>/dev/null
@@ -803,6 +819,10 @@ snapshot() {
     [ "$closed_h" = 1 ] && _prune "$HIST_DIR/fine.log" $(( HIST_FINE_DAYS * 86400 )) "$HIST_DIR/fine.cut" 3600
     if [ "$closed_d" = 1 ]; then
         _prune "$HIST_DIR/hourly.log" $(( HIST_HOURLY_DAYS * 86400 )) "$HIST_DIR/hourly.cut" 86400
+        local months
+        months=$(uci -q get "${NAME}.@${NAME}[0].hist_months")
+        case "$months" in ''|*[!0-9]*) months=0 ;; esac
+        [ "$months" -gt 0 ] && HIST_DAILY_DAYS=$(( months * 31 ))
         _prune "$HIST_DIR/daily.log" $(( HIST_DAILY_DAYS * 86400 )) "$HIST_DIR/daily.cut" 86400
         _quota_rollover
         _hist_save

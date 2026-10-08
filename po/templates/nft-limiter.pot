@@ -426,3 +426,27 @@ msgstr ""
 
 msgid "Show"
 msgstr ""
+
+msgid "Advanced Settings"
+msgstr ""
+
+msgid "Keep History For (months)"
+msgstr ""
+
+msgid "How long daily usage totals are kept (detailed history: 7 days; hourly: 45 days). Default 13."
+msgstr ""
+
+msgid "Save History To Flash"
+msgstr ""
+
+msgid "Copy the usage history to flash once a day and at shutdown (a few hundred kB at most), so it survives reboots. Off keeps it in RAM only and removes the flash copy."
+msgstr ""
+
+msgid "Burst (seconds)"
+msgstr ""
+
+msgid "How much traffic may pass above a limit in a short burst, in seconds of that limit (default 2). Lower is stricter and smoother; higher keeps web browsing snappier."
+msgstr ""
+
+msgid "Speeds are measured over the last few seconds; totals since the router started (they carry over rule changes and Restart, and reset on Disable or reboot). Rows covering several devices, and the global limit, expand (\\u25b8) into a per-device breakdown. Tinted rows are dropping traffic right now."
+msgstr ""

@@ -251,11 +251,13 @@ function cidrMisaligned(t) {
 // set (nftlim_acct_<row>_<dir>, row "def" = global limit). Totals carry over
 // rule rebuilds (the engine reseeds the counters) and reset on reboot.
 // Speeds come from the difference between two polls.
+// Decimal units (1 GB = 10^9 bytes), as quotas are entered and as ISPs
+// count, so the numbers line up with both.
 function fmtBytes(b) {
     b = Number(b) || 0;
-    var units = ['B', 'KiB', 'MiB', 'GiB', 'TiB'], i = 0;
-    while (b >= 1024 && i < units.length - 1) { b /= 1024; i++; }
-    return (i === 0 ? b : b.toFixed(2)) + ' ' + units[i];
+    var units = ['B', 'kB', 'MB', 'GB', 'TB'], i = 0;
+    while (b >= 1000 && i < units.length - 1) { b /= 1000; i++; }
+    return (i === 0 ? b : b.toFixed(b >= 100 ? 0 : b >= 10 ? 1 : 2)) + ' ' + units[i];
 }
 
 function fmtRate(bps) {
@@ -853,6 +855,26 @@ return view.extend({
             _('The global limit applies only inside this window/days; outside it, ' +
               'un-matched traffic is unrestricted. Leave times at 00:00 and days ' +
               'empty to always apply.'))).depends({ glimit: '1', gschedule: '1' });
+
+        // Advanced: off by default, shown with the switch below. The switch
+        // is only a view setting (stored, but not read by the engine).
+        o = s.option(form.Flag, 'show_advanced', _('Advanced Settings'));
+        o.default = '0';
+        o = s.option(form.Value, 'hist_months', _('Keep History For (months)'),
+            _('How long daily usage totals are kept (detailed history: 7 days; hourly: 45 days). Default 13.'));
+        o.datatype = 'range(1,60)';
+        o.placeholder = '13';
+        o.depends('show_advanced', '1');
+        o = s.option(form.Flag, 'hist_save', _('Save History To Flash'),
+            _('Copy the usage history to flash once a day and at shutdown (a few hundred kB at most), so it survives reboots. Off keeps it in RAM only and removes the flash copy.'));
+        o.default = '1';
+        o.rmempty = false;
+        o.depends('show_advanced', '1');
+        o = s.option(form.Value, 'burst', _('Burst (seconds)'),
+            _('How much traffic may pass above a limit in a short burst, in seconds of that limit (default 2). Lower is stricter and smoother; higher keeps web browsing snappier.'));
+        o.datatype = 'range(0.1,30)';
+        o.placeholder = '2';
+        o.depends('show_advanced', '1');
 
         // ------------------------------------------------------------------
         // Per-device rules section
