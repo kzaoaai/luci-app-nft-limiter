@@ -25,7 +25,7 @@
 # (meta iifname for download, meta oifname for upload), so LAN-to-LAN
 # traffic is never rate-limited.
 #
-# Commands: start | stop | add <idx> | del <idx> | status
+# Commands: start | stop | add <idx> | del <idx> | status | stats
 #   (add/del rebuild the whole chain; kept for compatibility)
 
 . /lib/functions.sh
@@ -39,6 +39,9 @@ NFT_FILE="/var/run/nft-limiter.nft"
 # never leaves a window without the limiter's rules.
 FW4_BODY="/var/run/nft-limiter.fw4.nft"
 FW4_LINK="/usr/share/nftables.d/table-post/30-nft-limiter.nft"
+# Row index -> row key ("sorted,targets") at the last build, so a rebuild
+# can carry each row's counters over even if rows were reordered.
+KEYS_FILE="/var/run/nft-limiter.keys"
 # UTC offset at the last build; the ntp hotplug hook rebuilds on a change.
 TZOFF_FILE="/var/run/nft-limiter.tzoff"
 OBJ_PREFIX="nftlim_"
@@ -165,22 +168,97 @@ check_firewall_hook() {
 }
 
 # -----------------------------------------------------------------------
+# Counter carry-over. Before a rebuild, _snapshot_counters reads the live
+# rule counters and per-address accounting sets and files them by row key
+# (the row's sorted targets, or "default" for the global limit) and rule
+# tag, using the index->key map of the previous build. The new rules then
+# start from those values ("counter packets N bytes M"), so totals survive
+# rebuilds, reordering and fw4 reloads up to the last build; a reboot or a
+# changed target starts from zero.
+#   $_carry_file lines:  C <key>|<tag> <packets> <bytes>
+#                        S <key>|<set suffix> <elements>
+# -----------------------------------------------------------------------
+_snapshot_counters() {
+    local name idx dir key els
+    : > "$_carry_file"
+    [ -s "$KEYS_FILE" ] || return 0
+    nft list chain inet "$NFT_TABLE" "$NFT_CHAIN" 2>/dev/null | awk -v kf="$KEYS_FILE" '
+        BEGIN { FS = "[ \t]+"; while ((getline l < kf) > 0) { split(l, a, "\t"); key[a[1]] = a[2] } }
+        / counter packets / && / comment "/ {
+            p = b = c = ""
+            for (i = 1; i < NF; i++) {
+                if ($i == "packets") p = $(i + 1)
+                if ($i == "bytes") b = $(i + 1)
+                if ($i == "comment") c = $(i + 1)
+            }
+            gsub(/"/, "", c)
+            if (c ~ /^default_/) k = "default|" substr(c, 9)
+            else if (match(c, /^dev_[0-9]+_/)) {
+                idx = substr(c, 5, RLENGTH - 5)
+                if (!(idx in key)) next
+                k = key[idx] "|" substr(c, RLENGTH + 1)
+            } else next
+            P[k] += p; B[k] += b
+        }
+        END { for (k in P) printf "C\t%s\t%s\t%s\n", k, P[k], B[k] }' >> "$_carry_file"
+    for name in $(_list_objects set); do
+        case "$name" in "${OBJ_PREFIX}acct_"*) ;; *) continue ;; esac
+        idx="${name#${OBJ_PREFIX}acct_}"; dir="${idx#*_}"; idx="${idx%%_*}"
+        if [ "$idx" = "def" ]; then key="default"; else
+            key=$(awk -F '\t' -v i="$idx" '$1 == i { print $2; exit }' "$KEYS_FILE")
+            [ -n "$key" ] || continue
+        fi
+        els=$(nft list set inet "$NFT_TABLE" "$name" 2>/dev/null | tr '\n\t' '  ' \
+            | sed -n 's/.*elements = { \([^}]*\) }.*/\1/p' | sed 's/  */ /g; s/ *$//')
+        [ -n "$els" ] && printf 'S\t%s|%s\t%s\n' "$key" "$dir" "$els" >> "$_carry_file"
+    done
+}
+
+# _counter <tag> -- set $_ctr to the counter statement for rule tag <tag>
+#   of row $_rowkey: carried values the first time the tag is used in this
+#   build (several rules can share a tag; the total goes on the first),
+#   else a fresh counter. Sets a variable rather than printing, so it runs
+#   in the current shell and $_carried keeps track.
+_counter() {
+    local k="${_rowkey}|$1" v
+    _ctr="counter"
+    case "$_carried" in *" $k "*) return ;; esac
+    _carried="$_carried $k "
+    v=$(awk -F '\t' -v k="$k" '$1 == "C" && $2 == k { print "packets " $3 " bytes " $4; exit }' "$_carry_file")
+    _ctr="counter${v:+ $v}"
+}
+
+# _acct_set <name> <type> <suffix> -- declare a per-address accounting set
+#   (dynamic, one counter per address), seeded with carried elements.
+_acct_set() {
+    local els
+    els=$(awk -F '\t' -v k="${_rowkey}|$3" '$1 == "S" && $2 == k { print $3; exit }' "$_carry_file")
+    [ -n "$els" ] && els=" elements = { $els };"
+    printf '    set %s { type %s; flags dynamic; counter; size 1024;%s }\n' \
+        "$1" "$2" "$els" >> "$_obj_file"
+}
+
+# -----------------------------------------------------------------------
 # _dir_lines <tag> <match> <prefix> <kb> <block> <limit_name>
 #   One direction of one device: a drop rule (block), or a limit-over-drop
 #   rule plus the terminal pass-through accept. Comment dev_<tag>[_pass].
 # -----------------------------------------------------------------------
 _dir_lines() {
     local tag="$1" match="$2" prefix="$3" kb="$4" block="$5" lname="$6"
+    local t="${tag#*_}"
     if [ "$block" = "1" ]; then
-        printf '        %s %scounter drop comment "dev_%s"\n' "$match" "$prefix" "$tag"
+        _counter "$t"
+        printf '        %s %s%s drop comment "dev_%s"\n' "$match" "$prefix" "$_ctr" "$tag"
         return
     fi
     if [ "$kb" -gt 0 ] 2>/dev/null; then
         # counter after the limit, so it counts only what is dropped.
-        printf '        %s %slimit name "%s" counter drop comment "dev_%s"\n' \
-            "$match" "$prefix" "$lname" "$tag"
+        _counter "$t"
+        printf '        %s %slimit name "%s" %s drop comment "dev_%s"\n' \
+            "$match" "$prefix" "$lname" "$_ctr" "$tag"
     fi
-    printf '        %s %scounter accept comment "dev_%s_pass"\n' "$match" "$prefix" "$tag"
+    _counter "${t}_pass"
+    printf '        %s %s%s accept comment "dev_%s_pass"\n' "$match" "$prefix" "$_ctr" "$tag"
 }
 
 # -----------------------------------------------------------------------
@@ -219,6 +297,19 @@ _rule_lines() {
 
     local in_if="meta iifname { ${_iface_set} }" out_if="meta oifname { ${_iface_set} }"
     local ldl="${OBJ_PREFIX}${idx}_dl" lul="${OBJ_PREFIX}${idx}_ul"
+    # Rows covering several addresses (subnet, range, list) also count per
+    # address, for the Stats breakdown. No verdict, so placed first.
+    local acct="${OBJ_PREFIX}acct_${idx}"
+    case "$v4" in *[,/-]*)
+        _acct_set "${acct}_dl" ipv4_addr dl; _acct_set "${acct}_ul" ipv4_addr ul
+        printf '        %s ip daddr %s %supdate @%s_dl { ip daddr } comment "dev_%s_acct"\n' "$in_if" "$v4" "$prefix" "$acct" "$idx"
+        printf '        %s ip saddr %s %supdate @%s_ul { ip saddr } comment "dev_%s_acct"\n' "$out_if" "$v4" "$prefix" "$acct" "$idx"
+    ;; esac
+    case "$v6" in *[,/]*)
+        _acct_set "${acct}_dl6" ipv6_addr dl6; _acct_set "${acct}_ul6" ipv6_addr ul6
+        printf '        %s ip6 daddr %s %supdate @%s_dl6 { ip6 daddr } comment "dev_%s_acct"\n' "$in_if" "$v6" "$prefix" "$acct" "$idx"
+        printf '        %s ip6 saddr %s %supdate @%s_ul6 { ip6 saddr } comment "dev_%s_acct"\n' "$out_if" "$v6" "$prefix" "$acct" "$idx"
+    ;; esac
     if [ -n "$v4" ]; then
         _dir_lines "${idx}_dl" "$in_if ip daddr $v4" "$prefix" "$dl_kb" "$block" "$ldl"
         _dir_lines "${idx}_ul" "$out_if ip saddr $v4" "$prefix" "$ul_kb" "$block" "$lul"
@@ -258,15 +349,29 @@ _catch_all_lines() {
     [ -n "$time_expr" ] && prefix="${time_expr} "
     [ -n "$day_expr"  ] && prefix="${prefix}${day_expr} "
 
+    _rowkey="default"
+    # Per-address accounting of the traffic the global limit applies to
+    # (the Stats "top talkers" list).
+    if [ "$dl_kb" -gt 0 ] 2>/dev/null || [ "$ul_kb" -gt 0 ] 2>/dev/null; then
+        local a="${OBJ_PREFIX}acct_def"
+        _acct_set "${a}_dl" ipv4_addr dl; _acct_set "${a}_ul" ipv4_addr ul
+        _acct_set "${a}_dl6" ipv6_addr dl6; _acct_set "${a}_ul6" ipv6_addr ul6
+        printf '        meta iifname { %s } %supdate @%s_dl { ip daddr } comment "default_acct"\n' "$_iface_set" "$prefix" "$a"
+        printf '        meta oifname { %s } %supdate @%s_ul { ip saddr } comment "default_acct"\n' "$_iface_set" "$prefix" "$a"
+        printf '        meta iifname { %s } %supdate @%s_dl6 { ip6 daddr } comment "default_acct"\n' "$_iface_set" "$prefix" "$a"
+        printf '        meta oifname { %s } %supdate @%s_ul6 { ip6 saddr } comment "default_acct"\n' "$_iface_set" "$prefix" "$a"
+    fi
     if [ "$dl_kb" -gt 0 ] 2>/dev/null; then
         local dl_burst=$((dl_kb * 2))
-        printf '        meta iifname { %s } %slimit rate over %s kbytes/second burst %s kbytes counter drop comment "default_dl"\n' \
-            "$_iface_set" "$prefix" "$dl_kb" "$dl_burst"
+        _counter dl
+        printf '        meta iifname { %s } %slimit rate over %s kbytes/second burst %s kbytes %s drop comment "default_dl"\n' \
+            "$_iface_set" "$prefix" "$dl_kb" "$dl_burst" "$_ctr"
     fi
     if [ "$ul_kb" -gt 0 ] 2>/dev/null; then
         local ul_burst=$((ul_kb * 2))
-        printf '        meta oifname { %s } %slimit rate over %s kbytes/second burst %s kbytes counter drop comment "default_ul"\n' \
-            "$_iface_set" "$prefix" "$ul_kb" "$ul_burst"
+        _counter ul
+        printf '        meta oifname { %s } %slimit rate over %s kbytes/second burst %s kbytes %s drop comment "default_ul"\n' \
+            "$_iface_set" "$prefix" "$ul_kb" "$ul_burst" "$_ctr"
     fi
 }
 
@@ -357,6 +462,9 @@ _emit_device() {
         [ -n "$m" ] || continue
         case " $macs " in *" $m "*) ;; *) macs="${macs:+$macs }$m" ;; esac
     done
+    _rowkey=$(for t in $target; do echo "$t"; done | sort | tr '\n' ',')
+    _rowkey="${_rowkey%,}"
+    printf '%s\t%s\n' "$idx" "$_rowkey" >> "${KEYS_FILE}.new"
     _time_and_day_expr "$timestart" "$timeend" "$week"
     _rule_lines "$idx" "$target" "$dl_kb" "$ul_kb" "${block:-0}" "$macs" "$_time_expr" "$_day_expr"
 }
@@ -381,7 +489,10 @@ build_chain() {
     local rules_file="/tmp/nft-limiter-rules.$$" name
     _obj_file="/tmp/nft-limiter-obj.$$"
     _learn_file="/tmp/nft-limiter-learn.$$"
-    : > "$rules_file"; : > "$_obj_file"; : > "$_learn_file"
+    _carry_file="/tmp/nft-limiter-carry.$$"
+    _carried=""
+    : > "$rules_file"; : > "$_obj_file"; : > "$_learn_file"; : > "${KEYS_FILE}.new"
+    _snapshot_counters
 
     # Emit device rules most-specific-first (smallest address count) so a
     # per-host rule wins over a broader subnet/range that contains it, and
@@ -427,7 +538,7 @@ build_chain() {
         cat "$rules_file"
         printf '}\n'
     } > "${FW4_BODY}.new"
-    rm -f "$rules_file" "$_obj_file" "$_learn_file"
+    rm -f "$rules_file" "$_obj_file" "$_learn_file" "$_carry_file"
 
     # Apply it ourselves in one transaction: ensure the chain exists, flush
     # it, drop our old limit objects (rates may have changed; nothing
@@ -444,10 +555,17 @@ build_chain() {
         for name in $(_list_objects limit); do
             printf 'delete limit inet %s %s\n' "$NFT_TABLE" "$name"
         done
+        # Accounting sets are recreated with their carried elements.
+        for name in $(_list_objects set); do
+            case "$name" in "${OBJ_PREFIX}acct_"*)
+                printf 'delete set inet %s %s\n' "$NFT_TABLE" "$name" ;;
+            esac
+        done
         printf 'table inet %s {\n    include "%s"\n}\n' "$NFT_TABLE" "${FW4_BODY}.new"
     } > "$NFT_FILE"
     nft -f "$NFT_FILE" || return 1
     mv "${FW4_BODY}.new" "$FW4_BODY"
+    mv "${KEYS_FILE}.new" "$KEYS_FILE"
     date +%z > "$TZOFF_FILE"
 }
 
@@ -471,7 +589,7 @@ stop() {
     for name in $(_list_objects set); do
         nft delete set inet "${NFT_TABLE}" "$name" 2>/dev/null
     done
-    rm -f "$NFT_FILE" "$TZOFF_FILE" "$FW4_BODY"
+    rm -f "$NFT_FILE" "$TZOFF_FILE" "$FW4_BODY" "$KEYS_FILE"
 }
 
 status() {
@@ -485,6 +603,18 @@ status() {
     uci show firewall 2>/dev/null | grep -A4 "nft-limiter" || echo "(no firewall hook)"
 }
 
+# stats -- for the LuCI Stats tab, one JSON document per line: the chain
+#   (rule counters), then each per-address accounting set.
+stats() {
+    local name
+    nft -j list chain inet "${NFT_TABLE}" "${NFT_CHAIN}" 2>/dev/null || echo null
+    for name in $(_list_objects set); do
+        case "$name" in "${OBJ_PREFIX}acct_"*)
+            nft -j list set inet "${NFT_TABLE}" "$name" 2>/dev/null ;;
+        esac
+    done
+}
+
 case "$1" in
     start)  start ;;
     stop)   stop ;;
@@ -492,5 +622,6 @@ case "$1" in
     # specificity order and the shared limit objects. Rebuild instead.
     add|del) start ;;
     status) status ;;
+    stats)  stats ;;
     *)      start ;;
 esac

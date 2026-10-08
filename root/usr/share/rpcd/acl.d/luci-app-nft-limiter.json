@@ -5,6 +5,7 @@
 			"uci": [ "nft-limiter", "firewall" ],
 			"file": {
 				"/usr/sbin/nft": [ "exec" ],
+				"/usr/bin/nft-limiter": [ "exec" ],
 				"/sbin/ip": [ "exec" ]
 			}
 		},

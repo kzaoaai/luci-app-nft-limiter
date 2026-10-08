@@ -18,7 +18,7 @@ Fast, minimal-CPU per-device bandwidth control for OpenWrt using native **nftabl
 - **Block toggle** — drop a device's WAN traffic outright (both directions), optionally on its schedule
 - **IPv6 aware** — a single-IPv4 device with a known MAC is also matched on IPv6 (upload by MAC, download by its learned global addresses), sharing one limit across both families; IPv6 addresses and prefixes work as targets too
 - **Time scheduling** — time-of-day and day-of-week windows, both per-rule and for the global default limit
-- **Live stats** — a Status tab shows per-device accepted/dropped traffic from native nftables counters
+- **Live stats** — current speed per rule, totals that survive rule changes, dropped traffic, a tint on rules that are limiting right now, and a per-device breakdown for subnet/range/multi-device rules and for the global limit (top talkers)
 - **Self-healing** — hooks into `firewall4` include so rules survive interface reloads
 - **Modern UI** — sortable GridSection with live device picker (hostname + IP from DHCP/ARP)
 - **APK + IPK** — CI builds packages for OpenWrt 25.12+ (apk) and 24.10 (ipk); both are supported

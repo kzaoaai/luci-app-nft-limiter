@@ -172,28 +172,10 @@ msgstr ""
 msgid "Service command failed: "
 msgstr ""
 
-msgid "Live traffic accounting per rule. Counters reset whenever the rule set is rebuilt (service restart, or adding/editing a device)."
-msgstr ""
-
 msgid "Device"
 msgstr ""
 
-msgid "Down accepted"
-msgstr ""
-
-msgid "Down dropped"
-msgstr ""
-
-msgid "Up accepted"
-msgstr ""
-
-msgid "Up dropped"
-msgstr ""
-
 msgid "(disabled)"
-msgstr ""
-
-msgid "Global default limit"
 msgstr ""
 
 msgid "The QoS chain is not loaded. Use the Enable button above to start the limiter."
@@ -284,4 +266,37 @@ msgid "Multiple rules for %s:"
 msgstr ""
 
 msgid "Multiple rules for this entry:"
+msgstr ""
+
+msgid "Speeds are measured over the last few seconds; totals since the router started (they carry over rule changes and Restart, and reset on Disable or reboot). Rows covering several devices, and the global limit, expand (▸) into a per-device breakdown. Tinted rows are dropping traffic right now."
+msgstr ""
+
+msgid "%s dropped"
+msgstr ""
+
+msgid "blocked, trying"
+msgstr ""
+
+msgid "limiting"
+msgstr ""
+
+msgid "Global default limit (shared)"
+msgstr ""
+
+msgid "Down now"
+msgstr ""
+
+msgid "Up now"
+msgstr ""
+
+msgid "Down total"
+msgstr ""
+
+msgid "Up total"
+msgstr ""
+
+msgid "block %s"
+msgstr ""
+
+msgid "No traffic since the counters started."
 msgstr ""
