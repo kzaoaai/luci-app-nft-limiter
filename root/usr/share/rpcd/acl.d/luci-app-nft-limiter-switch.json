@@ -1,12 +1,18 @@
 {
 	"luci-app-nft-limiter-switch": {
-		"description": "Only run nft-limiter-switch: turn rules with a switch name on/off and set their hours (for a limited login, e.g. an iOS Shortcut)",
+		"description": "Only run nft-limiter-switch: turn rules with a switch name on/off and set their hours (for a limited login, e.g. an iOS Shortcut). The ubus grant lets the session call file.exec at all; the file grant limits it to this one command.",
 		"read": {
+			"ubus": {
+				"file": [ "exec" ]
+			},
 			"file": {
 				"/usr/libexec/nft-limiter-switch": [ "exec" ]
 			}
 		},
 		"write": {
+			"ubus": {
+				"file": [ "exec" ]
+			},
 			"file": {
 				"/usr/libexec/nft-limiter-switch": [ "exec" ]
 			}
