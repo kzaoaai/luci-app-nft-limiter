@@ -11,7 +11,8 @@ Fast, minimal-CPU per-device bandwidth control for OpenWrt using native **nftabl
 
 ## Features
 
-- **Native nftables rules** — `limit rate over … drop` policing, near-zero CPU overhead
+- **Shaping by default** — each rule's downloads are queued in their own HTB + fq_codel class instead of dropped, so senders slow down rather than having data thrown away. On a set of real devices this cut wasted ISP data from 8.8% to 3.3% of limited downloads (QUIC-heavy phones: 20% → 3%). nftables still does all the matching (targets, schedules, quotas) and only tags packets; untagged and LAN-to-LAN traffic is never touched. Policing (`limit rate over … drop`, lowest CPU) stays available in Settings; uploads are always policed, since dropped uploads never reach the ISP
+- **Waste counter** — downloaded data that reached the router but not the device (it still counts against the ISP quota), per rule and per billing period
 - **Selectable Interfaces** — Select interface(s) where traffic is shaped (wan, wan2, VPN, etc...)
 - **Flexible targets** — single IP, CIDR subnet, IP range (`192.168.1.10-192.168.1.50`), or any mix of them in one rule (multi-select picker with your devices, hostnames and LAN/VLAN subnets); all of a rule's targets share its one limit
 - **Overlap hints** — an "i" badge on rules that other rules also match, listing them in checking order and highlighting them in the grid
@@ -45,7 +46,8 @@ config nft-limiter
                                   # months use their last day
     option hist_months 13         # months of daily history kept (default 13)
     option hist_save  1           # copy history to flash daily/at shutdown
-    option burst      2           # burst allowance, in seconds of each limit
+    option mode       shape       # downloads: shape (queue, default) | police (drop)
+    option burst      2           # burst allowance in seconds of each limit (uploads; downloads when policing)
     option iface     'wan'        # interface(s) to rate-limit (space-separated). Include
                                   # every uplink (failover WAN, VPN tunnels that carry
                                   # policy-routed traffic): traffic leaving through an

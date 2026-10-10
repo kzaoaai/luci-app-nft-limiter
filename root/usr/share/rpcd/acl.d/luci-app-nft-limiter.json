@@ -6,6 +6,8 @@
 			"file": {
 				"/usr/sbin/nft": [ "exec" ],
 				"/usr/bin/nft-limiter": [ "exec" ],
+				"/www/luci-static/resources/nftlimiter/*": [ "read" ],
+				"/www/luci-static/resources/nftctl.js": [ "read" ],
 				"/sbin/ip": [ "exec" ]
 			}
 		},

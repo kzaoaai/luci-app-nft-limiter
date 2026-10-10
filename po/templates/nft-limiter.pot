@@ -146,8 +146,6 @@ msgstr ""
 msgid "Stopped"
 msgstr ""
 
-msgid "fw4 nft mode"
-msgstr ""
 
 
 msgid "no rules loaded"
@@ -449,4 +447,48 @@ msgid "Rules"
 msgstr ""
 
 msgid "Global limit on: down %s / up %s Mbit/s, %s, shared by all devices without their own rule"
+msgstr ""
+
+msgid "shaping"
+msgstr ""
+
+
+msgid "Wasted today"
+msgstr ""
+
+msgid "Wasted"
+msgstr ""
+
+msgid "Download Limiting"
+msgstr ""
+
+msgid "Shape queues each rule's downloads at its rate, so senders slow down instead of having data thrown away; it wastes far less of your ISP data. Police drops whatever exceeds the rate, with a short burst allowance; it uses the least CPU. Uploads are always policed: dropped uploads never reach the ISP."
+msgstr ""
+
+msgid "Shape (recommended)"
+msgstr ""
+
+msgid "Police"
+msgstr ""
+
+msgid "How much traffic may pass above a limit in a short burst, in seconds of that limit (default 2): uploads always, downloads in Police mode. Lower is stricter and smoother; higher keeps web browsing snappier."
+msgstr ""
+
+msgid "policing"
+msgstr ""
+
+msgid "Downloaded data that reached the router but never reached the device: it still counts against your ISP data."
+msgstr ""
+
+
+msgid "policing downloads"
+msgstr ""
+
+msgid "shaping downloads"
+msgstr ""
+
+msgid "since %s"
+msgstr ""
+
+msgid "wasted this billing period%s: %s (%s of limited downloads)"
 msgstr ""

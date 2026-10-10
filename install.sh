@@ -47,15 +47,38 @@ if [ ! -s "$FILE_NAME" ]; then
     exit 1
 fi
 
-# 3. Install
+# 3. Dependencies. Refresh the package lists, then make sure what download
+#    shaping needs is present: kmod-sched-core (HTB, fq_codel, filters),
+#    kmod-ifb and a tc binary (tc-tiny unless some tc is already installed;
+#    naming one avoids the package manager having to pick a "tc" provider).
+#    The package depends on these too; installing them first is what makes
+#    the dependency resolvable. If they cannot be installed (no matching
+#    kernel modules in the feed), the limiter still runs and polices.
+echo "Updating package lists..."
+if [ "$PKG_MGR" = "apk" ]; then apk update >/dev/null 2>&1; else opkg update >/dev/null 2>&1; fi
+NEED="kmod-sched-core kmod-ifb"
+command -v tc >/dev/null 2>&1 || NEED="$NEED tc-tiny"
+for p in $NEED; do
+    if [ "$PKG_MGR" = "apk" ]; then
+        apk info -e "$p" >/dev/null 2>&1 && continue
+        echo "Installing dependency $p ..."
+        apk add "$p" >/dev/null 2>&1 || echo "Warning: could not install $p; downloads will be policed, not shaped."
+    else
+        opkg list-installed | grep -q "^$p " && continue
+        echo "Installing dependency $p ..."
+        opkg install "$p" >/dev/null 2>&1 || echo "Warning: could not install $p; downloads will be policed, not shaped."
+    fi
+done
+
+# 4. Install
 echo "Installing..."
 if [ "$PKG_MGR" = "apk" ]; then
-    apk add --allow-untrusted "./$FILE_NAME"
+    apk add --allow-untrusted "./$FILE_NAME" || { echo "Error: install failed."; exit 1; }
 else
-    opkg install "./$FILE_NAME"
+    opkg install "./$FILE_NAME" || { echo "Error: install failed."; exit 1; }
 fi
 
-# 4. Enable and start
+# 5. Enable and start
 rm -rf /tmp/luci-indexcache
 rm -f "/tmp/$FILE_NAME"
 
@@ -65,4 +88,9 @@ rm -f "/tmp/$FILE_NAME"
 # would drop every rule, the limiter's included, while it reloads.
 /etc/init.d/nft-limiter reapply
 
+if [ "$PKG_MGR" = "apk" ]; then
+    echo "Installed: $(apk list -I 2>/dev/null | grep -o 'luci-app-nft-limiter-[^ ]*')"
+else
+    echo "Installed: $(opkg list-installed | grep '^luci-app-nft-limiter ')"
+fi
 echo "Done! Open LuCI -> Network -> NFT Limiter to configure rules."

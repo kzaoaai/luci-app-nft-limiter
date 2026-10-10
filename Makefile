@@ -12,8 +12,8 @@ PKG_LICENSE:=MIT
 PKG_LICENSE_FILES:=LICENSE
 
 LUCI_TITLE:=LuCI app for NFT Limiter (nftables/fw4 per-device bandwidth control)
-LUCI_DESCRIPTION:=Per-device download/upload rate limiting via nftables. Supports IP, CIDR, and IP ranges. Requires OpenWrt 25.12+ with firewall4.
-LUCI_DEPENDS:=+ip-full +nftables +bc +firewall4
+LUCI_DESCRIPTION:=Per-device download/upload rate limiting: downloads shaped (tc HTB + fq_codel) or policed (nftables), uploads policed. Supports IP, CIDR, and IP ranges. Requires OpenWrt 25.12+ with firewall4.
+LUCI_DEPENDS:=+ip-full +nftables +bc +firewall4 +tc +kmod-sched-core +kmod-ifb
 LUCI_PKGARCH:=all
 
 PKG_VERSION:=1.6.0

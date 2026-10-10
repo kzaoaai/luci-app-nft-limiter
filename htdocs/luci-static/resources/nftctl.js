@@ -94,7 +94,10 @@ return baseclass.extend({
             E('div', {}, [
                 E('strong', {}, 'nft-limiter v' + pkgVersion + ' — '),
                 E('span', { 'style': 'color:' + color + ';font-weight:bold' }, stateTxt),
-                ' (' + _('fw4 nft mode') + ')'
+                // The page supplies the download mode and an inline note
+                // (the waste counter) for this line.
+                (typeof self.modeLabel == 'function' && self.modeLabel()) ? ' (' + self.modeLabel() + ')' : '',
+                self.inline || ''
             ]),
             detail ? E('div', { 'style': 'color:#666;margin-top:.2em' }, detail) : '',
             self.extra || '',
@@ -109,11 +112,14 @@ return baseclass.extend({
     // Build the always-visible header: the page title and subtitle, the
     // service state and controls. Self-loads the real state and polls every
     // 5s. onUpdate(enabled, out), if given, runs after each poll; extra, if
-    // given, is a node shown under the state line.
-    render: function(onUpdate, extra) {
+    // given, is a node shown under the state line; opts.modeLabel() names
+    // the mode shown in brackets, opts.inline is a node appended to the line.
+    render: function(onUpdate, extra, opts) {
         var self = this;
         self.onUpdate = onUpdate;
         self.extra = extra;
+        self.modeLabel = opts && opts.modeLabel;
+        self.inline = opts && opts.inline;
         var box = E('div', { 'style': 'margin:.25em 0 1em' });
         self.fill(box, false, null);
         self.refresh(box);

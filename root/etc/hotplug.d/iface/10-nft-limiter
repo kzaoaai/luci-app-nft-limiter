@@ -4,4 +4,7 @@ ifaces=$(uci -q get nft-limiter.@nft-limiter[0].iface)
 [ -z "$ifaces" ] && ifaces="wan"
 case " $ifaces " in
     *" $INTERFACE "*) sleep 5; /etc/init.d/nft-limiter reapply ;;
+    *)  # A LAN-side interface came (back) up: shape mode re-attaches its
+        # redirect filters, which an interface restart removes.
+        [ -s /var/run/nft-limiter.tags ] && { sleep 2; /usr/bin/nft-limiter tcsync; } ;;
 esac

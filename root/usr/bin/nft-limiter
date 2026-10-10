@@ -43,6 +43,20 @@ FW4_LINK="/usr/share/nftables.d/table-post/30-nft-limiter.nft"
 # Row index -> row key ("sorted,targets") at the last build, so a rebuild
 # can carry each row's counters over even if rows were reordered.
 KEYS_FILE="/var/run/nft-limiter.keys"
+# Download control mode (UCI "mode"): "shape" (default) queues each rule's
+# downloads in its own HTB + fq_codel class; "police" drops what exceeds
+# the rate (nft limit). Uploads are always policed: dropped uploads never
+# reach the ISP, so they waste no data. In shape mode nft still does all
+# the matching (targets, schedules, specificity, quotas) and only tags a
+# rule's download packets with a mark in the top byte (TAG_MASK); a clsact
+# egress filter on each LAN-side interface sends tagged packets to one IFB
+# device, whose HTB tree has a class per tag. Untagged traffic (LAN-to-LAN,
+# unlimited rules, rules outside their schedule) never leaves the fast path.
+#   tag = rule index + 1 (1-127), its quota throttle = tag + 127,
+#   the global default limit = 255.
+SHAPE_DEV="ifb-nftl"
+TAG_MASK="0xff000000"
+TAGS_FILE="/var/run/nft-limiter.tags"     # "<tag> <kbit> <row key>" per class
 # Usage history (RAM, tiered) and its flash copy, written once a day and
 # at shutdown. See the History section below.
 HIST_DIR="/var/run/nft-limiter-hist"
@@ -264,6 +278,12 @@ _acct_set() {
         "$1" "$2" "$els" >> "$_obj_file"
 }
 
+# _markset <tag> -- the nft statement that tags a packet for class <tag>,
+#   keeping the low 24 bits of the mark (pbr, mwan3 and fw4 use those).
+_markset() {
+    printf 'meta mark set meta mark & 0x00ffffff | 0x%02x000000' "$1"
+}
+
 # -----------------------------------------------------------------------
 # _dir_lines <tag> <match> <prefix> <kb> <block> <limit_name>
 #   One direction of one device: a drop rule (block), or a limit-over-drop
@@ -276,15 +296,30 @@ _dir_lines() {
     # drops (block) or drops above the throttle rate (throttle). Placed
     # first, so each packet counts against the quota once.
     if [ -n "$_q_name" ] && [ "$block" != "1" ]; then
-        local qlim=""
-        [ -n "$_q_throttle" ] && qlim="limit name \"${OBJ_PREFIX}qlim_${tag%%_*}_${t%6}\" "
-        _counter "${t}_q"
-        printf '        %s %squota name "%s" %s%s drop comment "dev_%s_q"\n' \
-            "$match" "$prefix" "$_q_name" "$qlim" "$_ctr" "$tag"
+        if [ -n "$_q_throttle" ] && [ -n "$_qtag" ] && [ "${t#dl}" != "$t" ]; then
+            # Shape mode: past the quota, downloads go to the throttle class.
+            _counter "${t}_qpass"
+            printf '        %s %squota name "%s" %s %s accept comment "dev_%s_qpass"\n' \
+                "$match" "$prefix" "$_q_name" "$(_markset "$_qtag")" "$_ctr" "$tag"
+        else
+            local qlim=""
+            [ -n "$_q_throttle" ] && qlim="limit name \"${OBJ_PREFIX}qlim_${tag%%_*}_${t%6}\" "
+            _counter "${t}_q"
+            printf '        %s %squota name "%s" %s%s drop comment "dev_%s_q"\n' \
+                "$match" "$prefix" "$_q_name" "$qlim" "$_ctr" "$tag"
+        fi
     fi
     if [ "$block" = "1" ]; then
         _counter "$t"
         printf '        %s %s%s drop comment "dev_%s"\n' "$match" "$prefix" "$_ctr" "$tag"
+        return
+    fi
+    if [ -n "$_stag" ] && [ "${t#dl}" != "$t" ]; then
+        # Shape mode download: tag for the rule's class and accept; the
+        # pass counter counts what arrived (the class counts delivery).
+        _counter "${t}_pass"
+        printf '        %s %s%s %s accept comment "dev_%s_pass"\n' \
+            "$match" "$prefix" "$(_markset "$_stag")" "$_ctr" "$tag"
         return
     fi
     if [ "$kb" -gt 0 ] 2>/dev/null; then
@@ -317,9 +352,25 @@ _rule_lines() {
         esac
     done
 
+    # Shape mode: this rule's download class (tag = index + 1) and, with a
+    # throttle quota, its throttle class (tag + 127). Rules past index 126
+    # stay policed.
+    _stag=""; _qtag=""
+    if [ "$_shape" = 1 ] && [ "$block" != "1" ] && [ "$idx" -lt 127 ]; then
+        if [ "$dl_kb" -gt 0 ] 2>/dev/null; then
+            _stag=$(( idx + 1 ))
+            echo "$_stag $(( dl_kb * 8 )) $_rowkey" >> "$_tags_new"
+        fi
+        if [ -n "$_q_throttle" ]; then
+            _qtag=$(( idx + 128 ))
+            echo "$_qtag $(( _q_rate_kb * 8 )) $_rowkey" >> "$_tags_new"
+        fi
+    fi
+
     if [ "$block" != "1" ]; then
         for kb in "dl $dl_kb" "ul $ul_kb"; do
             set -- $kb
+            [ "$1" = dl ] && [ -n "$_stag" ] && continue
             [ "$2" -gt 0 ] 2>/dev/null && \
                 printf '    limit %s%s_%s { rate over %s kbytes/second burst %s kbytes }\n' \
                     "$OBJ_PREFIX" "$idx" "$1" "$2" "$(_burst "$2")" >> "$_obj_file"
@@ -397,7 +448,13 @@ _catch_all_lines() {
         printf '        meta iifname { %s } %supdate @%s_dl6 { ip6 daddr } comment "default_acct"\n' "$_iface_set" "$prefix" "$a"
         printf '        meta oifname { %s } %supdate @%s_ul6 { ip6 saddr } comment "default_acct"\n' "$_iface_set" "$prefix" "$a"
     fi
-    if [ "$dl_kb" -gt 0 ] 2>/dev/null; then
+    if [ "$dl_kb" -gt 0 ] 2>/dev/null && [ "$_shape" = 1 ]; then
+        # Shape mode: tag for the shared default class (255).
+        echo "255 $(( dl_kb * 8 )) default" >> "$_tags_new"
+        _counter dl_pass
+        printf '        meta iifname { %s } %s%s %s comment "default_dl_pass"\n' \
+            "$_iface_set" "$prefix" "$(_markset 255)" "$_ctr"
+    elif [ "$dl_kb" -gt 0 ] 2>/dev/null; then
         local dl_burst; dl_burst=$(_burst "$dl_kb")
         _counter dl
         printf '        meta iifname { %s } %slimit rate over %s kbytes/second burst %s kbytes %s drop comment "default_dl"\n' \
@@ -518,6 +575,7 @@ _emit_device() {
         if [ "$qact" = throttle ]; then
             _q_throttle=1
             qrate=$(_mbit_to_kb "${qrate:-1}")
+            _q_rate_kb=$qrate
             for t in dl ul; do
                 printf '    limit %sqlim_%s_%s { rate over %s kbytes/second burst %s kbytes }\n' \
                     "$OBJ_PREFIX" "$idx" "$t" "$qrate" "$(_burst "$qrate")" >> "$_obj_file"
@@ -539,6 +597,79 @@ _list_objects() {
 }
 
 # -----------------------------------------------------------------------
+# Shaping (tc). _lan_devs lists the LAN-side devices downloads leave by:
+# every static-address interface without a default gateway that is not a
+# rate-limited (WAN/tunnel) interface. _tc_apply builds the IFB device's
+# HTB tree from $TAGS_FILE and attaches the redirect filters; _tc_attach
+# (re)attaches only the filters, for an interface that came back up;
+# _tc_teardown removes everything (police mode, stop). Needs kmod-ifb,
+# kmod-sched-core (htb, fw, mirred, skbedit, clsact) and tc.
+# -----------------------------------------------------------------------
+_lan_devs() {
+    local i st dev wan
+    wan=" $(uci -q get "${NAME}.@${NAME}[0].iface") "
+    for i in $(ubus list 'network.interface.*' 2>/dev/null | sed 's/^network\.interface\.//'); do
+        case "$wan" in *" $i "*) continue ;; esac
+        st=$(ifstatus "$i" 2>/dev/null) || continue
+        [ "$(echo "$st" | jsonfilter -e '@.proto')" = static ] || continue
+        [ -n "$(echo "$st" | jsonfilter -e '@.route[@.target="0.0.0.0"].nexthop')" ] && continue
+        dev=$(echo "$st" | jsonfilter -e '@.l3_device')
+        [ -n "$dev" ] && [ "$dev" != lo ] && echo "$dev"
+    done | sort -u
+}
+
+_tc_attach() {
+    local dev tag
+    [ -s "$TAGS_FILE" ] || return 0
+    for dev in $(_lan_devs); do
+        tc qdisc add dev "$dev" clsact 2>/dev/null
+        tc filter del dev "$dev" egress prio 49 2>/dev/null
+        for tag in $(awk '{ print $1 }' "$TAGS_FILE"); do
+            tc filter add dev "$dev" egress prio 49 handle "$(printf '0x%02x000000/%s' "$tag" "$TAG_MASK")" \
+                fw action mirred egress redirect dev "$SHAPE_DEV" 2>/dev/null
+        done
+    done
+}
+
+_tc_teardown() {
+    local dev
+    for dev in $(_lan_devs); do tc filter del dev "$dev" egress prio 49 2>/dev/null; done
+    ip link del "$SHAPE_DEV" 2>/dev/null
+    rm -f "$TAGS_FILE"
+}
+
+# _tc_apply <new tags file> -- returns 1 when shaping is unavailable
+#   (no IFB support or no tc), so the caller can fall back to policing.
+_tc_apply() {
+    local tag kbit hex
+    command -v tc >/dev/null || return 1
+    ip link show "$SHAPE_DEV" >/dev/null 2>&1 || {
+        modprobe ifb 2>/dev/null
+        ip link add "$SHAPE_DEV" type ifb 2>/dev/null || return 1
+    }
+    ip link set "$SHAPE_DEV" up
+    tc qdisc del dev "$SHAPE_DEV" root 2>/dev/null
+    tc qdisc add dev "$SHAPE_DEV" root handle 1: htb default 0 || return 1
+    while read -r tag kbit _; do
+        hex=$(printf '%x' "$tag")
+        tc class add dev "$SHAPE_DEV" parent 1: classid "1:$hex" htb rate "${kbit}kbit" ceil "${kbit}kbit" quantum 1514
+        tc qdisc add dev "$SHAPE_DEV" parent "1:$hex" handle "$hex:" fq_codel
+        # Classify by tag, then clear the tag: the shaped packet goes back
+        # out its LAN device, and LAN bridges whose port is a VLAN on
+        # another LAN bridge (guest, IoT, ... on br-lan) would otherwise
+        # send it through the shaper a second time.
+        tc filter add dev "$SHAPE_DEV" parent 1: prio 1 handle "$(printf '0x%02x000000/%s' "$tag" "$TAG_MASK")" fw classid "1:$hex" \
+            action skbedit mark 0x0/"$TAG_MASK"
+    done < "$1"
+    mv "$1" "$TAGS_FILE"
+    _tc_attach
+    # The classes were recreated, so their delivery counters restart at 0:
+    # forget their last values so the next snapshot counts from zero.
+    [ -f "$HIST_DIR/last.vals" ] && sed -i '/^S|/d' "$HIST_DIR/last.vals"
+    return 0
+}
+
+# -----------------------------------------------------------------------
 # build_chain -- flush and rebuild the complete QoS chain from UCI config
 # -----------------------------------------------------------------------
 build_chain() {
@@ -551,6 +682,10 @@ build_chain() {
     _learn_file="/tmp/nft-limiter-learn.$$"
     _carry_file="/tmp/nft-limiter-carry.$$"
     _carried=""
+    _tags_new="/tmp/nft-limiter-tags.$$"
+    : > "$_tags_new"
+    _shape=0
+    [ "$(uci -q get "${NAME}.@${NAME}[0].mode")" != police ] && _shape=1
     # Record usage up to now before the rules change.
     snapshot >/dev/null 2>&1
     : > "$rules_file"; : > "$_obj_file"; : > "$_learn_file"; : > "${KEYS_FILE}.new"
@@ -628,6 +763,21 @@ build_chain() {
         done
         printf 'table inet %s {\n    include "%s"\n}\n' "$NFT_TABLE" "${FW4_BODY}.new"
     } > "$NFT_FILE"
+    # Shaping classes go up before the rules that tag packets for them. If
+    # shaping is unavailable, rebuild once more in police mode.
+    if [ "$_shape" = 1 ]; then
+        if ! _tc_apply "$_tags_new"; then
+            logger -t nft-limiter "shaping unavailable (needs kmod-ifb, kmod-sched-core, tc); policing instead"
+            rm -f "$_tags_new"
+            uci -q set "${NAME}.@${NAME}[0].mode=police"
+            build_chain; local rc=$?
+            uci -q revert "${NAME}.@${NAME}[0].mode"
+            return $rc
+        fi
+    else
+        rm -f "$_tags_new"
+        _tc_teardown
+    fi
     nft -f "$NFT_FILE" || return 1
     mv "${FW4_BODY}.new" "$FW4_BODY"
     mv "${KEYS_FILE}.new" "$KEYS_FILE"
@@ -651,6 +801,7 @@ stop() {
     snapshot >/dev/null 2>&1
     _hist_save
     nft delete chain inet "${NFT_TABLE}" "${NFT_CHAIN}" 2>/dev/null
+    _tc_teardown
     for name in $(_list_objects quota); do
         nft delete quota inet "${NFT_TABLE}" "$name" 2>/dev/null
     done
@@ -713,12 +864,13 @@ _collect_values() {
             }
             gsub(/"/, "", c)
             if (c == "default_dl") { V["R|default|dd"] += b; next }
+            if (c == "default_dl_pass") { V["R|default|d"] += b; next }
             if (c == "default_ul") { V["R|default|ud"] += b; next }
             if (!match(c, /^dev_[0-9]+_/)) next
             idx = substr(c, 5, RLENGTH - 5); t = substr(c, RLENGTH + 1)
             if (!(idx in key)) next
-            if (t == "dl_pass" || t == "dl6_pass") s = "d"
-            else if (t == "ul_pass" || t == "ul6_pass") s = "u"
+            if (t ~ /^dl6?_(q)?pass$/) s = "d"
+            else if (t ~ /^ul6?_(q)?pass$/) s = "u"
             else if (t ~ /^dl/) s = "dd"
             else if (t ~ /^ul/) s = "ud"
             else next
@@ -737,6 +889,16 @@ _collect_values() {
             | sed -n 's/.*elements = { \([^}]*\) }.*/\1/p' | tr ',' '\n' \
             | awk -v k="$key" -v d="$dir" '{ for (i = 1; i < NF; i++) if ($i == "bytes") print "A|" k "|" $1 "|" d "\t" $(i + 1) }'
     done
+    # Shape mode: bytes each row's classes delivered (S|<row key>|d).
+    if [ -s "$TAGS_FILE" ]; then
+        tc -s class show dev "$SHAPE_DEV" 2>/dev/null | awk -v tf="$TAGS_FILE" '
+            BEGIN { while ((getline l < tf) > 0) { split(l, a, " "); key[sprintf("1:%x", a[1])] = a[3] } }
+            $1 == "class" { cls = $3 }
+            # Minus the 14-byte Ethernet header each packet carries at the
+            # LAN egress, so it compares with the IP bytes nft counted.
+            $1 == "Sent" && (cls in key) { V["S|" key[cls] "|d"] += $2 - 14 * $4 }
+            END { for (k in V) print k "\t" V[k] }'
+    fi
     for i in $(uci -q get "${NAME}.@${NAME}[0].iface"); do
         dev=$(ifstatus "$i" 2>/dev/null | jsonfilter -e '@.l3_device' 2>/dev/null)
         [ -n "$dev" ] || continue
@@ -794,6 +956,35 @@ _hist_restore() {
     mkdir -p "$HIST_DIR" && tar -xzf "$HIST_SAVE" -C "$HIST_DIR" 2>/dev/null
 }
 
+# _delta_line <now> <last.vals> -- read current "key<TAB>value" lines on
+#   stdin and print "<now> key=delta ..." for the non-zero deltas (a value
+#   that went down was reset, so its delta is the new value). Adds each
+#   row's download waste, R|<row key>|w: dropped downloads (dd), plus in
+#   shape mode what arrived but its classes did not deliver (d - S).
+_delta_line() {
+    awk -v now="$1" -v lf="$2" -F '\t' '
+        BEGIN { while ((getline l < lf) > 0) { split(l, a, "\t"); last[a[1]] = a[2] } }
+        { c = $2 + 0; p = ($1 in last) ? last[$1] + 0 : 0; d = (c >= p) ? c - p : c
+          D[$1] = d; P[$1] = 1 }
+        END {
+            for (k in D) {
+                if (k !~ /^R\|.*\|(d|dd)$/) continue
+                rk = substr(k, 3); sub(/\|(d|dd)$/, "", rk); R[rk] = 1
+            }
+            # Not clamped per interval: the class counters are read a moment
+            # after the nft ones, so d - S jitters around the true value and only
+            # sums over a range are meaningful (the UI clamps those at 0).
+            for (rk in R) {
+                w = D["R|" rk "|dd"] + 0
+                if (("S|" rk "|d") in P) w += D["R|" rk "|d"] - D["S|" rk "|d"]
+                if (w != 0) D["R|" rk "|w"] = w
+            }
+            out = now
+            for (k in D) if (D[k] > 0 || (k ~ /\|w$/ && D[k] != 0)) out = out " " k "=" D[k]
+            print out
+        }'
+}
+
 snapshot() {
     local now off cur line hs ds closed_h closed_d
     _hist_restore
@@ -805,11 +996,7 @@ snapshot() {
         mv "$cur" "$HIST_DIR/last.vals"; echo "$now" > "$HIST_DIR/last.ts"
         return 0
     fi
-    line=$(awk -v now="$now" -F '\t' '
-        FNR == NR { last[$1] = $2; next }
-        { c = $2 + 0; p = ($1 in last) ? last[$1] + 0 : 0; d = (c >= p) ? c - p : c
-          if (d > 0) out = out " " $1 "=" d }
-        END { print now out }' "$HIST_DIR/last.vals" "$cur")
+    line=$(_delta_line "$now" "$HIST_DIR/last.vals" < "$cur")
     mv "$cur" "$HIST_DIR/last.vals"; echo "$now" > "$HIST_DIR/last.ts"
     echo "$line" >> "$HIST_DIR/fine.log"
     off=$(_tz_seconds)
@@ -878,7 +1065,7 @@ _quota_used() {
     now=$(date +%s); off=$(_tz_seconds)
     if [ "$2" = period ]; then from=$(_period_start); else from=$(( now - (now + off) % 86400 )); fi
     _hist_records | awk -v F="$from" -v rk="R|$1|" '
-        $2 >= F { for (j = 3; j <= NF; j++) if (index($j, rk) == 1) { n = index($j, "="); s += substr($j, n + 1) } }
+        $2 >= F { for (j = 3; j <= NF; j++) if (index($j, rk) == 1 && $j !~ /^[^=]*\|w=/) { n = index($j, "="); s += substr($j, n + 1) } }
         END { printf "%d", s }'
 }
 
@@ -893,11 +1080,7 @@ _hist_records() {
       [ -f "$HIST_DIR/hourly.log" ] && awk -v c="$fc" '$1 < c { print 3600, $0 }' "$HIST_DIR/hourly.log"
       [ -f "$HIST_DIR/fine.log" ] && awk '{ print 0, $0 }' "$HIST_DIR/fine.log"
       if [ -f "$HIST_DIR/last.vals" ]; then
-          _collect_values | awk -v now="$(date +%s)" -F '\t' -v lf="$HIST_DIR/last.vals" '
-              BEGIN { while ((getline l < lf) > 0) { split(l, a, "\t"); last[a[1]] = a[2] } }
-              { c = $2 + 0; p = ($1 in last) ? last[$1] + 0 : 0; d = (c >= p) ? c - p : c
-                if (d > 0) out = out " " $1 "=" d }
-              END { print 0, now out }'
+          echo "0 $(_collect_values | _delta_line "$(date +%s)" "$HIST_DIR/last.vals")"
       fi; } 2>/dev/null
 }
 
@@ -922,22 +1105,32 @@ history() {
     fc=0; hc=0
     [ -f "$HIST_DIR/fine.cut" ] && fc=$(cat "$HIST_DIR/fine.cut")
     [ -f "$HIST_DIR/hourly.cut" ] && hc=$(cat "$HIST_DIR/hourly.cut")
+    # When recording began (the oldest record kept), so a range that starts
+    # earlier can say its data is partial.
+    local first
+    first=$(for f in daily.log hourly.log fine.log; do [ -s "$HIST_DIR/$f" ] && head -n 1 "$HIST_DIR/$f" | cut -d' ' -f1; done | sort -n | head -n 1)
     base=660
     [ "$from" -lt "$fc" ] && base=3600
     [ "$from" -lt "$hc" ] && base=86400
     range=$(( to - from )); bucket=$(( (range + 149) / 150 ))
     [ "$bucket" -lt "$base" ] && bucket=$base
-    _hist_records | awk -v F="$from" -v T="$to" -v B="$bucket" -v now="$now" -v fc="$fc" -v hc="$hc" '
+    _hist_records | awk -v F="$from" -v T="$to" -v B="$bucket" -v now="$now" -v fc="$fc" -v hc="$hc" -v first="${first:-0}" '
         { t = $2; if (t < F || t >= T + ($1 == 0 ? 60 : 0)) next
           i = int((t - F) / B)
+          split("", hasw); split("", ddv)
           for (j = 3; j <= NF; j++) {
               n = index($j, "="); k = substr($j, 1, n - 1); v = substr($j, n + 1) + 0
               tot[k] += v
               if (k ~ /^R\|.*\|[du]$/ || k ~ /^I\|/) { ser[k, i] += v; sk[k] = 1 }
-          } }
+              if (k ~ /\|w$/) hasw[substr(k, 1, length(k) - 2)] = 1
+              if (k ~ /^R\|.*\|dd$/) ddv[substr(k, 1, length(k) - 3)] = v
+          }
+          # Records from before waste was recorded: dropped downloads are
+          # the waste.
+          for (r in ddv) if (!(r in hasw)) tot[r "|w"] += ddv[r] }
         END {
             nb = int((T - F + B - 1) / B)
-            printf "{\"from\":%d,\"to\":%d,\"now\":%d,\"bucket\":%d,\"fine_from\":%d,\"hourly_from\":%d,\"totals\":{", F, T, now, B, fc, hc
+            printf "{\"from\":%d,\"to\":%d,\"now\":%d,\"bucket\":%d,\"fine_from\":%d,\"hourly_from\":%d,\"first\":%d,\"totals\":{", F, T, now, B, fc, hc, first
             sep = ""; for (k in tot) { printf "%s\"%s\":%d", sep, k, tot[k]; sep = "," }
             printf "},\"series\":{"; sep = ""
             for (k in sk) {
@@ -957,6 +1150,8 @@ stats() {
     local name
     nft -j list chain inet "${NFT_TABLE}" "${NFT_CHAIN}" 2>/dev/null || echo null
     nft -j list quotas table inet "${NFT_TABLE}" 2>/dev/null
+    # Shape mode: the classes (a JSON array; class 1:<hex tag>).
+    [ -s "$TAGS_FILE" ] && tc -s -j class show dev "$SHAPE_DEV" 2>/dev/null
     for name in $(_list_objects set); do
         case "$name" in "${OBJ_PREFIX}acct_"*)
             nft -j list set inet "${NFT_TABLE}" "$name" 2>/dev/null ;;
@@ -973,6 +1168,7 @@ case "$1" in
     status) status ;;
     stats)  stats ;;
     snapshot) snapshot ;;
+    tcsync)   _tc_attach ;;
     history)  shift; history "$@" ;;
     *)      start ;;
 esac
