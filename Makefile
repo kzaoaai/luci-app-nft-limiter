@@ -15,6 +15,10 @@ LUCI_TITLE:=LuCI app for NFT Limiter (nftables/fw4 per-device bandwidth control)
 LUCI_DESCRIPTION:=Per-device download/upload rate limiting: downloads shaped (tc HTB + fq_codel) or policed (nftables), uploads policed. Supports IP, CIDR, and IP ranges. Requires OpenWrt 25.12+ with firewall4.
 LUCI_DEPENDS:=+ip-full +nftables +bc +firewall4 +tc +kmod-sched-core +kmod-ifb
 LUCI_PKGARCH:=all
+# Ship the JavaScript unminified: the view loader (view/nft-limiter.js)
+# reads nftlimiter/app.js over RPC and parses its leading require
+# directives; loaders cached by browsers from v3.0.x expect one per line.
+LUCI_MINIFY_JS:=0
 
 PKG_VERSION:=1.6.0
 PKG_RELEASE:=1

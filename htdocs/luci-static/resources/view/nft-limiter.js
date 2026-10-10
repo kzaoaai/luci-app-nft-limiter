@@ -18,14 +18,20 @@ var OWN = { nftctl: 'nftctl.js' };
 
 function loadModule(path) {
     return fs.read(BASE + path).then(function(source) {
-        var deps = [], args = '', m;
-        var re = /^\s*'require\s+(\S+?)(?:\s+as\s+([A-Za-z_]\w*))?';\s*$/gm;
-        while ((m = re.exec(source)) !== null) {
-            var dep = m[1];
-            deps.push(OWN[dep]
-                ? loadModule(OWN[dep]).then(function(Cls) { return new Cls(); })
-                : L.require(dep));
-            args += ', ' + (m[2] || dep.replace(/[^a-zA-Z0-9_]/g, '_'));
+        // The leading string-literal directives ('use strict', 'require x',
+        // 'require x as y'), read one after another from the start, as
+        // LuCI does: release builds minify the file onto one line.
+        var deps = [], args = '', m, r;
+        var tok = /(?:\s+|\/\/[^\n]*\n|\/\*[\s\S]*?\*\/)*(['"])([^'"\n]*)\1\s*;?/y;
+        tok.lastIndex = 0;
+        while ((m = tok.exec(source)) !== null) {
+            if (/^use\s+strict$/.test(m[2])) continue;
+            r = /^require\s+(\S+?)(?:\s+as\s+([A-Za-z_]\w*))?$/.exec(m[2]);
+            if (!r) break;
+            deps.push(OWN[r[1]]
+                ? loadModule(OWN[r[1]]).then(function(Cls) { return new Cls(); })
+                : L.require(r[1]));
+            args += ', ' + (r[2] || r[1].replace(/[^a-zA-Z0-9_]/g, '_'));
         }
         return Promise.all(deps).then(function(inst) {
             var factory = eval('(function(window, document, L' + args + ') { ' + source +
