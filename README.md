@@ -114,7 +114,8 @@ Let someone without the router's login turn one rule's block on or off, or chang
 ```sh
 uci add rpcd login
 uci set rpcd.@login[-1].username='family'
-uci set rpcd.@login[-1].password="$(uhttpd -m "$(read -rsp 'Password: ' p; echo "$p")")"
+printf 'Password: '; stty -echo; read -r p; stty echo; echo
+uci set rpcd.@login[-1].password="$(uhttpd -m "$p")"; unset p
 uci add_list rpcd.@login[-1].read='luci-app-nft-limiter-switch'
 uci add_list rpcd.@login[-1].write='luci-app-nft-limiter-switch'
 uci commit rpcd && /etc/init.d/rpcd restart
