@@ -1111,6 +1111,22 @@ return view.extend({
         o.placeholder = '1';
         o.depends('quota_action', 'throttle');
 
+        // Switch name (Edit dialog only): lets a limited login turn this
+        // rule's block on/off and set its hours through
+        // /usr/libexec/nft-limiter-switch, e.g. from an iOS Shortcut.
+        o = s.option(form.Value, 'switch_id', _('Switch Name'),
+            _('Optional short name (letters, digits, - or _) that lets a limited login, such as an iOS Shortcut, turn this rule\'s block on or off and change its hours. Empty: not switchable.'));
+        o.modalonly = true;
+        o.placeholder = _('none');
+        o.validate = function(section_id, value) {
+            if (!value) return true;
+            if (!/^[A-Za-z0-9_-]{1,32}$/.test(value)) return _('Use 1-32 letters, digits, - or _');
+            var dup = uci.sections('nft-limiter', 'device').some(function(d) {
+                return d['.name'] !== section_id && d.switch_id === value;
+            });
+            return dup ? _('Another rule already uses this name') : true;
+        };
+
         // On save, record each single-IPv4 rule's MAC so the backend can add
         // IPv6 rules even while the device is offline at boot. Unknown or
         // non-host targets clear it (the backend then falls back to leases

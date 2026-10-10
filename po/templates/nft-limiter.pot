@@ -492,3 +492,15 @@ msgstr ""
 
 msgid "wasted this billing period%s: %s (%s of limited downloads)"
 msgstr ""
+
+msgid "Switch Name"
+msgstr ""
+
+msgid "Optional short name (letters, digits, - or _) that lets a limited login, such as an iOS Shortcut, turn this rule's block on or off and change its hours. Empty: not switchable."
+msgstr ""
+
+msgid "Use 1-32 letters, digits, - or _"
+msgstr ""
+
+msgid "Another rule already uses this name"
+msgstr ""

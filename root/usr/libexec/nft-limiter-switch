@@ -1,0 +1,131 @@
+#!/bin/sh
+# nft-limiter-switch -- turn one rule's block on or off, or set its hours,
+# for people who should not have the router's login. A rule takes part only
+# when it has a switch name (UCI option switch_id, set in its Edit dialog),
+# and that name is the only way to address it here.
+#
+# Usage: nft-limiter-switch list
+#        nft-limiter-switch status <name>
+#        nft-limiter-switch on|off <name>
+#        nft-limiter-switch hours <name> <HH:MM> <HH:MM>
+#        nft-limiter-switch hours <name> allday
+#
+# Every command prints one JSON object (the rule's state after the command,
+# or {"error": ...}), so an iOS Shortcut can read it with "Get Dictionary".
+# A limited rpcd login is granted exec on this file and nothing else (ACL
+# group luci-app-nft-limiter-switch); everything it does is checked here.
+
+NAME=nft-limiter
+
+_json_str() {
+    printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'
+}
+
+_fail() {
+    printf '{"error":"%s"}\n' "$(_json_str "$1")"
+    exit 1
+}
+
+# _find <name> -- echo the UCI section index of the rule with that switch_id
+_find() {
+    local i=0 id
+    while uci -q get "${NAME}.@device[$i]" >/dev/null; do
+        id=$(uci -q get "${NAME}.@device[$i].switch_id")
+        [ -n "$id" ] && [ "$id" = "$1" ] && { echo "$i"; return 0; }
+        i=$((i + 1))
+    done
+    return 1
+}
+
+_mins() {
+    echo "$1" | awk -F: '{ print $1 * 60 + $2 }'
+}
+
+# _state <idx> -- print the rule's state as JSON
+_state() {
+    local i="$1" label en block ts te week from to allday now day inwin active text
+    label=$(uci -q get "${NAME}.@device[$i].comment")
+    [ -n "$label" ] || label=$(uci -q get "${NAME}.@device[$i].switch_id")
+    en=$(uci -q get "${NAME}.@device[$i].enable"); [ "$en" = 0 ] || en=1
+    block=$(uci -q get "${NAME}.@device[$i].block"); [ "$block" = 1 ] || block=0
+    ts=$(uci -q get "${NAME}.@device[$i].timestart"); ts=${ts:-00:00}
+    te=$(uci -q get "${NAME}.@device[$i].timeend"); te=${te:-00:00}
+    week=$(uci -q get "${NAME}.@device[$i].week"); week=${week:-0}
+    allday=false; [ "$ts" = 00:00 ] && [ "$te" = 00:00 ] && allday=true
+
+    # In force right now (router clock): enabled, blocking, inside the
+    # window (which may run past midnight) and on one of its days.
+    inwin=1
+    if [ "$allday" = false ]; then
+        now=$(( $(date +%H | sed 's/^0//') * 60 + $(date +%M | sed 's/^0//') ))
+        from=$(_mins "$ts"); to=$(_mins "$te")
+        if [ "$from" -lt "$to" ]; then
+            [ "$now" -ge "$from" ] && [ "$now" -lt "$to" ] || inwin=0
+        else
+            [ "$now" -ge "$from" ] || [ "$now" -lt "$to" ] || inwin=0
+        fi
+    fi
+    day=$(date +%u)
+    [ "$week" = 0 ] || case ",$week," in *",$day,"*) ;; *) inwin=0 ;; esac
+    active=false; [ "$en" = 1 ] && [ "$block" = 1 ] && [ "$inwin" = 1 ] && active=true
+
+    if [ "$en" = 1 ] && [ "$block" = 1 ]; then
+        if [ "$allday" = true ]; then text="$label is blocked all day."
+        else text="$label is blocked $ts to $te (allowed $te to $ts)."; fi
+        [ "$active" = true ] && text="$text Blocking right now." || text="$text Not blocking right now."
+    else
+        text="$label is not blocked."
+    fi
+    printf '{"name":"%s","label":"%s","blocked":%s,"active_now":%s,"from":"%s","to":"%s","allday":%s,"text":"%s"}\n' \
+        "$(_json_str "$(uci -q get "${NAME}.@device[$i].switch_id")")" "$(_json_str "$label")" \
+        "$([ "$en" = 1 ] && [ "$block" = 1 ] && echo true || echo false)" "$active" \
+        "$ts" "$te" "$allday" "$(_json_str "$text")"
+}
+
+_apply() {
+    uci commit "$NAME"
+    /etc/init.d/nft-limiter reapply >/dev/null 2>&1
+}
+
+_valid_time() {
+    echo "$1" | grep -qE '^([01][0-9]|2[0-3]):[0-5][0-9]$'
+}
+
+cmd="$1"; name="$2"
+case "$cmd" in
+    list)
+        i=0; sep=""; printf '['
+        while uci -q get "${NAME}.@device[$i]" >/dev/null; do
+            [ -n "$(uci -q get "${NAME}.@device[$i].switch_id")" ] && { printf '%s' "$sep"; _state "$i" | tr -d '\n'; sep=","; }
+            i=$((i + 1))
+        done
+        printf ']\n'
+        exit 0 ;;
+    status|on|off|hours) ;;
+    *) _fail "usage: list | status <name> | on <name> | off <name> | hours <name> <HH:MM> <HH:MM> | hours <name> allday" ;;
+esac
+
+echo "$name" | grep -qE '^[A-Za-z0-9_-]{1,32}$' || _fail "unknown switch"
+idx=$(_find "$name") || _fail "unknown switch"
+
+case "$cmd" in
+    on)
+        uci set "${NAME}.@device[$idx].enable=1"
+        uci set "${NAME}.@device[$idx].block=1"
+        _apply ;;
+    off)
+        uci set "${NAME}.@device[$idx].block=0"
+        _apply ;;
+    hours)
+        if [ "$3" = allday ]; then
+            from=00:00; to=00:00
+        else
+            from="$3"; to="$4"
+            _valid_time "$from" && _valid_time "$to" || _fail "times must be HH:MM"
+            [ "$from" = "$to" ] && _fail "start and end are the same; use allday"
+        fi
+        uci set "${NAME}.@device[$idx].timestart=$from"
+        uci set "${NAME}.@device[$idx].timeend=$to"
+        _apply ;;
+esac
+_state "$idx"

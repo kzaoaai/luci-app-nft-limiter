@@ -20,6 +20,7 @@ Fast, minimal-CPU per-device bandwidth control for OpenWrt using native **nftabl
 - **IPv6 aware** — a single-IPv4 device with a known MAC is also matched on IPv6 (upload by MAC, download by its learned global addresses), sharing one limit across both families; IPv6 addresses and prefixes work as targets too
 - **Usage history** — tiered history kept on the router (≈11-minute detail for 7 days, hourly for 45 days, daily for 13 months; saved to flash daily and at shutdown) with a range picker (today, yesterday, 7 days, this/last billing period, custom), per-rule trends, per-device breakdowns and per-uplink totals to compare with your ISP's counter
 - **Quotas** — per-rule data allowance per day or per billing period, then block or throttle
+- **Family switches** — give a rule a switch name and a limited login (e.g. an iOS Shortcut on someone's phone) can see its state, turn its block on or off and change its hours, and nothing else. See *Family switches* below.
 - **Time scheduling** — time-of-day and day-of-week windows, both per-rule and for the global default limit
 - **Live stats** — current speed per rule, totals that survive rule changes, dropped traffic, a tint on rules that are limiting right now, and a per-device breakdown for subnet/range/multi-device rules and for the global limit (top talkers)
 - **Self-healing** — hooks into `firewall4` include so rules survive interface reloads
@@ -102,3 +103,29 @@ config device
     option upload    15
     option comment   'Guests'
 ```
+
+## Family switches
+
+Let someone without the router's login turn one rule's block on or off, or change its hours, e.g. from an iOS Shortcut.
+
+1. In the rule's Edit dialog, set **Switch Name** (e.g. `phone`).
+2. Create a login that may only run the switch command (the router asks for its password; nothing else is reachable with it):
+
+```sh
+uci add rpcd login
+uci set rpcd.@login[-1].username='family'
+uci set rpcd.@login[-1].password="$(uhttpd -m "$(read -rsp 'Password: ' p; echo "$p")")"
+uci add_list rpcd.@login[-1].read='luci-app-nft-limiter-switch'
+uci add_list rpcd.@login[-1].write='luci-app-nft-limiter-switch'
+uci commit rpcd && /etc/init.d/rpcd restart
+```
+
+3. The client logs in and runs the command over JSON-RPC (`POST http://<router>/ubus`):
+
+```json
+{"jsonrpc":"2.0","id":1,"method":"call","params":["00000000000000000000000000000000","session","login",{"username":"family","password":"<password>"}]}
+{"jsonrpc":"2.0","id":2,"method":"call","params":["<ubus_rpc_session>","file","exec",{"command":"/usr/libexec/nft-limiter-switch","params":["status","phone"]}]}
+```
+
+Commands: `status <name>`, `on <name>`, `off <name>`, `hours <name> <HH:MM> <HH:MM>`, `hours <name> allday`, and `list`. Each prints the rule's state as JSON (`blocked`, `active_now`, `from`, `to`, `allday`, `text`).
+
