@@ -57,14 +57,41 @@ def result_stdout(resp_uid):
     it = U(); act("is.workflow.actions.getitemfromlist", {"WFInput": out(r, "Dictionary Value"), "WFItemSpecifier": "Item At Index", "WFItemIndex": 2}, it)
     so = getkey(out(it, "Item from List"), "stdout")
     d = U(); act("is.workflow.actions.detect.dictionary", {"WFInput": out(so, "Dictionary Value")}, d)
-    return getkey(out(d, "Dictionary"), "text")
+    return d, getkey(out(d, "Dictionary"), "text")
 def exec_params(cmd_parts):
     return ['{"jsonrpc":"2.0","id":2,"method":"call","params":["', ("var", "Session"),
             '","file","exec",{"command":"/usr/libexec/nft-limiter-switch","params":['] + cmd_parts + [']}]}']
-def cond(mode, grp, extra=None):
+def cond(mode, grp, test=None):
+    """If/Otherwise/End If. test = (condition code, variable name, text):
+    4 is, 99 contains. The variable must hold Text: Shortcuts types a
+    variable by the action that set it, and an If on a Dictionary Value
+    offers no text operand ("Please choose a value for each parameter")."""
     p = {"WFControlFlowMode": mode, "GroupingIdentifier": grp}
-    if extra: p.update(extra)
+    if test:
+        code, name, s = test
+        p.update({"WFCondition": code, "WFConditionalActionString": s,
+                  "WFInput": {"Type": "Variable", "Variable": var(name)}})
     act("is.workflow.actions.conditional", p)
+def ask_time(prompt, default, name):
+    """Ask for a time, starting at variable default ("HH:MM", from the
+    status), and set variable name to it as "HH:MM". A Time picker reads
+    its start only from WFAskActionDefaultAnswerTime holding a Date (a Date
+    action's output); text, or the DateAndTime/Date keys, are ignored and
+    it starts at the current time. A custom "HH:mm" format follows the
+    device's 12/24-hour setting on iOS (8 PM came out "08:00"), so the
+    time goes out as ISO 8601 and the HH:MM before the seconds is cut
+    from that."""
+    d = U(); act("is.workflow.actions.date", {"WFDateActionMode": "Specified Date",
+        "WFDateActionDate": tstr([("var", default)])}, d)
+    a = U(); act("is.workflow.actions.ask", {"WFInputType": "Time", "WFAskActionPrompt": prompt,
+        "WFAskActionDefaultAnswerTime": tstr([("out", d, "Date")])}, a)
+    f = U(); act("is.workflow.actions.format.date", {"WFDateFormatStyle": "ISO 8601", "WFISO8601IncludeTime": True,
+        "WFDate": tstr([("out", a, "Provided Input")])}, f)
+    mt = U(); act("is.workflow.actions.text.match", {"WFMatchTextPattern": r"[0-9]{2}:[0-9]{2}(?=:)",
+        "text": tstr([("out", f, "Formatted Date")])}, mt)
+    g = U(); act("is.workflow.actions.getitemfromlist", {"WFInput": out(mt, "Matches"), "WFItemSpecifier": "First Item"}, g)
+    setvar(name, out(text([("out", g, "Item from List")]), "Text"))
+def item(parts): return {"WFItemType": 0, "WFValue": tstr(parts)}
 
 # 1. log in, keep the session id
 t = text(['{"jsonrpc":"2.0","id":1,"method":"call","params":["00000000000000000000000000000000","session","login",{"username":"' + USER + '","password":"' + PW + '"}]}'])
@@ -75,11 +102,15 @@ sid = getkey(out(it, "Item from List"), "ubus_rpc_session")
 setvar("Session", out(sid, "Dictionary Value"))
 # 2. status
 t = text(exec_params(['"status","' + SW + '"']))
-st = result_stdout(post(t))
-setvar("Status", out(st, "Dictionary Value"))
+sd, st = result_stdout(post(t))
+setvar("Status", out(text([("out", st, "Dictionary Value")]), "Text"))
+# the rule's current hours, where the time pickers start
+for key, name in (("from", "CurFrom"), ("to", "CurTo")):
+    v = getkey(out(sd, "Dictionary"), key)
+    setvar(name, out(text([("out", v, "Dictionary Value")]), "Text"))
 # 3. which toggle to offer
 g = U()
-cond(0, g, {"WFCondition": 99, "WFConditionalActionString": "is not blocked", "WFInput": {"Type": "Variable", "Variable": var("Status")}})
+cond(0, g, (99, "Status", "is not blocked"))
 setvar("Toggle", out(text(["Turn block on"]), "Text"))
 setvar("ToggleCmd", out(text(['"on"']), "Text"))
 cond(1, g)
@@ -87,20 +118,16 @@ setvar("Toggle", out(text(["Turn block off"]), "Text"))
 setvar("ToggleCmd", out(text(['"off"']), "Text"))
 cond(2, g)
 # 4. choose: the toggle or change hours
-lst = U(); act("is.workflow.actions.list", {"WFItems": [tstr([("var", "Toggle")]), "Change hours"]}, lst)
+lst = U(); act("is.workflow.actions.list", {"WFItems": [item([("var", "Toggle")]), item(["Change hours"])]}, lst)
 ch = U(); act("is.workflow.actions.choosefromlist", {"WFInput": out(lst, "List"), "WFChooseFromListActionPrompt": tstr([("var", "Status")])}, ch)
 setvar("Choice", out(ch, "Chosen Item"))
 g2 = U()
-cond(0, g2, {"WFCondition": 4, "WFConditionalActionString": "Change hours", "WFInput": {"Type": "Variable", "Variable": var("Choice")}})
+cond(0, g2, (4, "Choice", "Change hours"))
 m = U()
 act("is.workflow.actions.choosefrommenu", {"WFControlFlowMode": 0, "GroupingIdentifier": m, "WFMenuPrompt": "Block hours", "WFMenuItems": ["Set times", "All day"]})
 act("is.workflow.actions.choosefrommenu", {"WFControlFlowMode": 1, "GroupingIdentifier": m, "WFMenuItemTitle": "Set times"})
-a1 = U(); act("is.workflow.actions.ask", {"WFInputType": "Time", "WFAskActionPrompt": "Block from"}, a1)
-f1 = U(); act("is.workflow.actions.format.date", {"WFDateFormatStyle": "Custom", "WFDateFormat": "HH:mm", "WFDate": tstr([("out", a1, "Provided Input")])}, f1)
-setvar("From", out(f1, "Formatted Date"))
-a2 = U(); act("is.workflow.actions.ask", {"WFInputType": "Time", "WFAskActionPrompt": "Block until"}, a2)
-f2 = U(); act("is.workflow.actions.format.date", {"WFDateFormatStyle": "Custom", "WFDateFormat": "HH:mm", "WFDate": tstr([("out", a2, "Provided Input")])}, f2)
-setvar("To", out(f2, "Formatted Date"))
+ask_time("Block from", "CurFrom", "From")
+ask_time("Block until", "CurTo", "To")
 setvar("Cmd", out(text(['"hours","' + SW + '","', ("var", "From"), '","', ("var", "To"), '"']), "Text"))
 act("is.workflow.actions.choosefrommenu", {"WFControlFlowMode": 1, "GroupingIdentifier": m, "WFMenuItemTitle": "All day"})
 setvar("Cmd", out(text(['"hours","' + SW + '","allday"']), "Text"))
@@ -110,7 +137,7 @@ setvar("Cmd", out(text([("var", "ToggleCmd"), ',"' + SW + '"']), "Text"))
 cond(2, g2)
 # 5. run it and show what the router now says
 t = text(exec_params([("var", "Cmd")]))
-done = result_stdout(post(t))
+_, done = result_stdout(post(t))
 act("is.workflow.actions.notification", {"WFNotificationActionTitle": TITLE, "WFNotificationActionBody": tstr([("out", done, "Dictionary Value")])})
 
 wf = {"WFWorkflowActions": actions, "WFWorkflowClientVersion": "2302.0.4", "WFWorkflowMinimumClientVersion": 900,

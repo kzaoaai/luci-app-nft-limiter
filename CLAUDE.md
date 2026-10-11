@@ -66,7 +66,13 @@ commit messages; use `192.0.2.x` placeholders.
   overhead not corrected).
 - Quota reset happens at the first snapshot after midnight (≤ ~11 min late); history and DST
   rebuilds depend on the ntpd hotplug (`history` takes a snapshot itself if none for 15 min).
-- `contrib/make-shortcut.py` Shortcut: the "contains" condition code (99) and building a
-  list from a variable are unverified on iOS; if the menu is blank, check those first.
+- `contrib/make-shortcut.py` Shortcut works on iOS and macOS (status, menu, change hours).
+  An If only offers a text operand when its variable holds Text, so values from "Get
+  Dictionary Value" go through a Text action first; the error otherwise is "Please choose a
+  value for each parameter in this action". Open the generated file in the Shortcuts
+  editor (or press Show on that error) to see which action is incomplete. Times go out
+  as ISO 8601 and are cut to HH:MM (a custom "HH:mm" follows the phone's 12-hour setting).
+  The time pickers start at the rule's current hours: a Time picker reads its start only
+  from `WFAskActionDefaultAnswerTime` holding a Date action's output.
 - Ideas not requested yet: days of the week in the family-switch hours; translations
   (`po/templates/nft-limiter.pot` is kept in sync, no languages).
