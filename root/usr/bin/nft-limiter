@@ -964,13 +964,16 @@ _hist_restore() {
 _delta_line() {
     awk -v now="$1" -v lf="$2" -F '\t' '
         BEGIN { while ((getline l < lf) > 0) { split(l, a, "\t"); last[a[1]] = a[2] } }
-        # A key missing from the last snapshot is a baseline, not traffic:
-        # counters carry over rebuilds, so a rule that vanished for one
-        # snapshot (a stop/start, an upgrade) comes back with its whole total.
+        # A key missing from the last snapshot, or one whose counter went
+        # down, is a new baseline, not traffic. Counters carry over rebuilds,
+        # so a rule that vanished for one snapshot (a stop/start, an upgrade)
+        # comes back with its whole total, and a firewall reload re-reads the
+        # include file, winding every counter back to its value at the last
+        # rebuild. Either way the next delta would be the whole total.
         # S| keys are the exception: _tc_apply drops them on purpose when it
         # recreates the classes, whose counters really do start at 0.
         { c = $2 + 0
-          if (!($1 in last) && $1 !~ /^S\|/) { P[$1] = 1; next }
+          if ($1 !~ /^S\|/ && (!($1 in last) || c < last[$1] + 0)) { P[$1] = 1; next }
           p = ($1 in last) ? last[$1] + 0 : 0; d = (c >= p) ? c - p : c
           D[$1] = d; P[$1] = 1 }
         END {

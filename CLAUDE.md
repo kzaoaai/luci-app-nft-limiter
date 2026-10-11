@@ -56,8 +56,10 @@ commit messages; use `192.0.2.x` placeholders.
   change needs a browser cache clear), keep `LUCI_MINIFY_JS:=0` (v3.0.x loaders expect one
   `'require …'` per line), and note LuCI binds `load`/`render` before `load` runs.
 - Counters carry over rebuilds via `/var/run/nft-limiter.keys` (index → row key). So in
-  `_delta_line` a key missing from the last snapshot is a baseline, never traffic (before
-  v3.1.3 a stop/start or upgrade re-counted every rule's whole total as one interval), and
+  `_delta_line` a key missing from the last snapshot, or a counter that went down, is a
+  baseline, never traffic: before v3.1.4 a stop/start or upgrade, and every firewall reload
+  (fw4 re-reads the include file, whose counters are frozen at the last rebuild), re-counted
+  each rule's whole total as one interval. And
   every command but `status`/`stats` holds `flock` on `/var/lock/nft-limiter.lock`, so a
   snapshot never reads the new keys file against the old chain.
 
