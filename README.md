@@ -128,5 +128,7 @@ uci commit rpcd && /etc/init.d/rpcd restart
 {"jsonrpc":"2.0","id":2,"method":"call","params":["<ubus_rpc_session>","file","exec",{"command":"/usr/libexec/nft-limiter-switch","params":["status","phone"]}]}
 ```
 
+`contrib/make-shortcut.py` builds an iOS/macOS Shortcut that does this (status, then block on/off or change hours); see its header for usage and signing.
+
 Commands: `status <name>`, `on <name>`, `off <name>`, `hours <name> <HH:MM> <HH:MM>`, `hours <name> allday`, and `list`. Each prints the rule's state as JSON (`blocked`, `active_now`, `from`, `to`, `allday`, `text`).
 
