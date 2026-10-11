@@ -964,7 +964,14 @@ _hist_restore() {
 _delta_line() {
     awk -v now="$1" -v lf="$2" -F '\t' '
         BEGIN { while ((getline l < lf) > 0) { split(l, a, "\t"); last[a[1]] = a[2] } }
-        { c = $2 + 0; p = ($1 in last) ? last[$1] + 0 : 0; d = (c >= p) ? c - p : c
+        # A key missing from the last snapshot is a baseline, not traffic:
+        # counters carry over rebuilds, so a rule that vanished for one
+        # snapshot (a stop/start, an upgrade) comes back with its whole total.
+        # S| keys are the exception: _tc_apply drops them on purpose when it
+        # recreates the classes, whose counters really do start at 0.
+        { c = $2 + 0
+          if (!($1 in last) && $1 !~ /^S\|/) { P[$1] = 1; next }
+          p = ($1 in last) ? last[$1] + 0 : 0; d = (c >= p) ? c - p : c
           D[$1] = d; P[$1] = 1 }
         END {
             for (k in D) {
@@ -1158,6 +1165,14 @@ stats() {
         esac
     done
 }
+
+# Rebuilds and snapshots never overlap: a snapshot taken mid-rebuild reads
+# the new index-to-row keys against the old chain (or no chain at all).
+# The lock is the open fd, so it goes away with the process.
+case "$1" in
+    status|stats) ;;
+    *) if command -v flock >/dev/null; then exec 9>/var/lock/nft-limiter.lock; flock -x 9; fi ;;
+esac
 
 case "$1" in
     start)  start ;;

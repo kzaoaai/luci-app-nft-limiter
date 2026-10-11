@@ -55,7 +55,11 @@ commit messages; use `192.0.2.x` placeholders.
   stamps module URLs with its own version. Keep the loader unchanged between releases (a
   change needs a browser cache clear), keep `LUCI_MINIFY_JS:=0` (v3.0.x loaders expect one
   `'require …'` per line), and note LuCI binds `load`/`render` before `load` runs.
-- Counters carry over rebuilds via `/var/run/nft-limiter.keys` (index → row key).
+- Counters carry over rebuilds via `/var/run/nft-limiter.keys` (index → row key). So in
+  `_delta_line` a key missing from the last snapshot is a baseline, never traffic (before
+  v3.1.3 a stop/start or upgrade re-counted every rule's whole total as one interval), and
+  every command but `status`/`stats` holds `flock` on `/var/lock/nft-limiter.lock`, so a
+  snapshot never reads the new keys file against the old chain.
 
 ## Current state
 
