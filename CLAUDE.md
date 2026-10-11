@@ -75,4 +75,8 @@ commit messages; use `192.0.2.x` placeholders.
   The time pickers start at the rule's current hours: a Time picker reads its start only
   from `WFAskActionDefaultAnswerTime` holding a Date action's output.
 - Ideas not requested yet: days of the week in the family-switch hours; translations
-  (`po/templates/nft-limiter.pot` is kept in sync, no languages).
+  (`po/templates/nft-limiter.pot` is kept in sync, no languages); "block/allow for N
+  minutes" from the Shortcut, deferred: it belongs on the router (a switch command storing
+  an override with an absolute end, rendered as an nft rule with `meta time <` so it ends
+  on time with no timer, shown in status/LuCI, cleared by the next explicit change), not in
+  the Shortcut, which cannot run later to undo it.
