@@ -65,8 +65,8 @@ commit messages; use `192.0.2.x` placeholders.
 
 ## Current state
 
-- v3.1.2 released (shape mode, waste counter, family switches, stable loader). No open
-  bugs.
+- v3.1.4 released (shape mode, waste counter, family switches, stable loader, history that
+  survives stop/start and firewall reloads). No open bugs.
 - Shape mode is proven on slow MIPS routers (MT7621): ~2.5% CPU at ~41 Mbit/s under load,
   and in daily use since v3.0 (4.7 and 7.4 GB through HTB, load average near 0, checked
   2026-10-12). Shaping
