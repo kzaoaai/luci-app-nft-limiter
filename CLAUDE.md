@@ -57,15 +57,21 @@ commit messages; use `192.0.2.x` placeholders.
   `'require …'` per line), and note LuCI binds `load`/`render` before `load` runs.
 - Counters carry over rebuilds via `/var/run/nft-limiter.keys` (index → row key).
 
-## Current state and open items
+## Current state
 
-- v3.1.2 released (shape mode, waste counter, family switches, stable loader).
-- Shaping waste vs policing was measured on real devices (≈3× less); validation of shape
-  mode in daily use on slow MIPS routers (MT7621) is light: ~2.5% CPU at ~41 Mbit/s.
-- Waste for traffic arriving through WireGuard tunnels under-reports by ~0.6% (per-packet
-  overhead not corrected).
-- Quota reset happens at the first snapshot after midnight (≤ ~11 min late); history and DST
-  rebuilds depend on the ntpd hotplug (`history` takes a snapshot itself if none for 15 min).
+- v3.1.2 released (shape mode, waste counter, family switches, stable loader). No open
+  bugs.
+- Shape mode is proven on slow MIPS routers (MT7621): ~2.5% CPU at ~41 Mbit/s under load,
+  and in daily use since v3.0 (4.7 and 7.4 GB through HTB, load average near 0, checked
+  2026-10-12). Shaping
+  wastes ≈3× less than policing (measured on real devices).
+- Accepted limits, by design, not to fix unless a user asks:
+  - Waste for traffic arriving through WireGuard tunnels reads ~0.6% low (per-packet
+    overhead not corrected; cosmetic).
+  - Quota resets land at the first snapshot after midnight (≤ ~11 min late), since there
+    is no cron; history and DST rebuilds ride the ntpd hotplug (`history` takes a
+    snapshot itself if none for 15 min).
+  - A billing day past the month's end (29-31) falls on the month's last day.
 - `contrib/make-shortcut.py` Shortcut works on iOS and macOS (status, menu, change hours).
   An If only offers a text operand when its variable holds Text, so values from "Get
   Dictionary Value" go through a Text action first; the error otherwise is "Please choose a
