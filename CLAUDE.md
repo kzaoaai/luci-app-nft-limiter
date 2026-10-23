@@ -74,10 +74,11 @@ commit messages; use `192.0.2.x` placeholders.
 
 ## Current state
 
-- v3.1.5 committed, not yet tagged: boot enable is the only on/off switch, LuCI's probe sees
-  an unloaded chain.
-- v3.1.4 released (shape mode, waste counter, family switches, stable loader, history that
-  survives stop/start and firewall reloads). No open bugs.
+- v3.1.5 released 2026-10-23: boot enable is the only on/off switch, LuCI's probe sees an
+  unloaded chain. The flag migration has run on real upgrades with the flag at 1; the
+  flag-0 branch (disable on upgrade) has only run against a scratch config. No open bugs.
+- Since v3.1.4: shape mode, waste counter, family switches, stable loader, history that
+  survives stop/start and firewall reloads.
 - Shape mode is proven on slow MIPS routers (MT7621): ~2.5% CPU at ~41 Mbit/s under load,
   and in daily use since v3.0 (4.7 and 7.4 GB through HTB, load average near 0, checked
   2026-10-12). Shaping
