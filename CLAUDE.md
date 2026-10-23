@@ -27,6 +27,9 @@ commit messages; use `192.0.2.x` placeholders.
 - Release: commit, `git tag -a vX.Y.Z`, push tag; when CI is done make sure that tag is
   GitHub's "Latest" (`gh release edit vX.Y.Z --latest`) — a slower older build can take it
   over, and `install.sh` installs whatever is Latest.
+- `gh` needs `--repo kzaoaai/luci-app-nft-limiter` (or `gh repo set-default`): a checkout
+  with the `upstream` remote (the eqosplus project this forked from) otherwise resolves
+  `gh run list` and `gh release list` to that repo and shows its old runs and releases.
 - Install/upgrade on a router: `wget -qO- https://raw.githubusercontent.com/kzaoaai/luci-app-nft-limiter/main/install.sh | sh`.
   It refreshes package lists, installs `kmod-sched-core`, `kmod-ifb` and `tc-tiny` (unless a
   `tc` exists) first, installs the package, `reapply`s (no firewall restart). Removes nothing;
