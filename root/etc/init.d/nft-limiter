@@ -11,42 +11,45 @@ USE_PROCD=1
 
 NAME=nft-limiter
 
-# Custom verbs driven by the LuCI Status tab service controls. These drive the
-# one-shot engine directly (and toggle the boot symlink) rather than procd
-# start/stop, which would emit harmless "ubus service delete" noise since this
-# service runs no persistent daemon.
-#   on     : set the master flag, enable on boot, and load the rules now
-#   off    : clear the master flag, stop the rules, and disable on boot
-#   reapply: rebuild the rules now (no flag change); no-op when disabled
+# On/off is the service's boot enable (/etc/rc.d/S99nft-limiter), and
+# nothing else: System > Startup, Home Assistant's service switch, `rc init`
+# and the LuCI Enable/Disable buttons all flip the same thing. Until v3.1.5 a
+# UCI flag also had to be 1, so enabling the service from any of those left
+# it "on" with no rules loaded.
+# Custom verbs driven by the LuCI Status tab service controls. They drive the
+# one-shot engine directly rather than procd start/stop, which would emit
+# harmless "ubus service delete" noise since this service runs no daemon.
+#   on     : enable on boot and load the rules now
+#   off    : disable on boot and remove the rules
+#   reapply: rebuild the rules now; no-op when disabled
 # Every rebuild is one atomic nft transaction (nft-limiter start), never a
 # stop followed by a start: stopping first would leave blocked devices with
 # internet access for the ~1-2 s the rebuild takes.
 EXTRA_COMMANDS="on off reapply"
-EXTRA_HELP="        on      Enable the limiter (set flag, enable on boot, load rules)
-        off     Disable the limiter (clear flag, stop rules, disable on boot)
-        reapply Rebuild the rules now without changing the enabled flag"
+EXTRA_HELP="        on      Enable the limiter (enable on boot, load rules)
+        off     Disable the limiter (disable on boot, remove rules)
+        reapply Rebuild the rules now; does nothing while disabled"
 
 on() {
-    uci -q set "${NAME}.@${NAME}[0].enabled=1"
-    uci -q commit "$NAME"
-    "/etc/init.d/${NAME}" enable
+    enable
     nft-limiter start
 }
 
+# Disable first, so a hotplug reapply racing this cannot load the rules again.
 off() {
-    uci -q set "${NAME}.@${NAME}[0].enabled=0"
-    uci -q commit "$NAME"
+    disable
     nft-limiter stop
-    "/etc/init.d/${NAME}" disable
 }
 
 reapply() {
-    [ "$(uci -q get "${NAME}.@${NAME}[0].enabled")" = "1" ] || return 0
+    enabled || return 0
     nft-limiter start
 }
 
+# Also what LuCI's apply (ucitrack) and procd's config trigger run, so a
+# settings change while disabled must not load the rules.
 start_service() {
-    if [ "$(uci -q get "${NAME}.@${NAME}[0].enabled")" = "1" ]; then
+    if enabled; then
         nft-limiter start
     else
         nft-limiter stop

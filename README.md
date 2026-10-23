@@ -38,11 +38,12 @@ wget -qO- https://raw.githubusercontent.com/kzaoaai/luci-app-nft-limiter/main/in
 
 Then open **LuCI → Network → NFT Limiter**.
 
+The limiter is on when its service is enabled, and that is the only switch: the Enable/Disable buttons in LuCI, System → Startup, `/etc/init.d/nft-limiter on|off` and a Home Assistant service switch all turn it on or off. (Before v3.1.5 a separate `enabled` option also had to be set; upgrading carries its value over and removes it.)
+
 ## UCI config reference
 
 ```
 config nft-limiter
-    option enabled   1            # master service on/off
     option period_day 1           # day (1-31) the ISP billing period starts; shorter
                                   # months use their last day
     option hist_months 13         # months of daily history kept (default 13)

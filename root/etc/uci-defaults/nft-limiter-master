@@ -1,0 +1,15 @@
+#!/bin/sh
+# v3.1.5: the service's boot enable is the only on/off switch. Up to v3.1.4 a
+# UCI flag also had to be 1, and only `start` read it, so Home Assistant,
+# System > Startup and the LuCI status could show the limiter on while no
+# rules were loaded. Carry the flag's setting over to the boot link once,
+# then drop the flag. Runs before the package postinst starts the service.
+flag=$(uci -q get nft-limiter.@nft-limiter[0].enabled) || exit 0
+if [ "$flag" = "1" ]; then
+	/etc/init.d/nft-limiter enable
+else
+	/etc/init.d/nft-limiter disable
+fi
+uci -q delete nft-limiter.@nft-limiter[0].enabled
+uci -q commit nft-limiter
+exit 0

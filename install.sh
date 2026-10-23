@@ -78,12 +78,13 @@ else
     opkg install "./$FILE_NAME" || { echo "Error: install failed."; exit 1; }
 fi
 
-# 5. Enable and start
+# 5. Rebuild the rules
 rm -rf /tmp/luci-indexcache
 rm -f "/tmp/$FILE_NAME"
 
+# The package enables the service on a first install; an upgrade keeps it
+# on or off as it was.
 /etc/init.d/rpcd restart
-/etc/init.d/nft-limiter enable
 # Rebuild the rules in place (one atomic transaction). A firewall restart
 # would drop every rule, the limiter's included, while it reloads.
 /etc/init.d/nft-limiter reapply

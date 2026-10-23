@@ -19,8 +19,11 @@ return baseclass.extend({
     NFT_ARGS: NFT_ARGS,
 
     // Resolve to the raw `nft -j list chain` output, or null if not loaded.
+    // For a missing chain nft fails, but cgi-exec still answers 200 with an
+    // empty body (it does not pass on the exit code), so check the content.
     probe: function() {
-        return L.resolveDefault(fs.exec_direct('/usr/sbin/nft', NFT_ARGS), null);
+        return L.resolveDefault(fs.exec_direct('/usr/sbin/nft', NFT_ARGS), null)
+            .then(function(out) { return (out && /"chain":/.test(out)) ? out : null; });
     },
 
     // Run an init verb (on/off/reapply) then refresh the block.

@@ -788,9 +788,8 @@ build_chain() {
 # Main commands
 # -----------------------------------------------------------------------
 start() {
-    local enabled
-    enabled=$(uci -q get "${NAME}.@${NAME}[0].enabled")
-    [ "$enabled" != "1" ] && return 0
+    # On/off is the service's boot enable (see /etc/init.d/nft-limiter).
+    /etc/init.d/nft-limiter enabled || return 0
     check_firewall_hook
     build_chain
 }
@@ -816,7 +815,7 @@ stop() {
 
 status() {
     echo "=== nft-limiter status ==="
-    printf 'Enabled : %s\n' "$(uci -q get "${NAME}.@${NAME}[0].enabled")"
+    printf 'Enabled : %s\n' "$(/etc/init.d/nft-limiter enabled && echo 1 || echo 0)"
     echo ""
     echo "=== ${NFT_CHAIN} chain ==="
     nft list chain inet "${NFT_TABLE}" "${NFT_CHAIN}" 2>/dev/null || echo "(chain not loaded)"

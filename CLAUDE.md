@@ -38,6 +38,15 @@ commit messages; use `192.0.2.x` placeholders.
 
 ## Invariants (the code does not say why)
 
+- **On/off is the service's boot enable, nothing else** (since v3.1.5). Home Assistant's
+  service switch, System > Startup and `rc init` only flip the boot link and call
+  start/stop, so a second switch drifts: up to v3.1.4 the UCI `enabled` flag also had to be 1,
+  and HA "on" left the limiter showing on with no rules. `start_service` still gates on the
+  link because LuCI apply (ucitrack) and procd's config trigger call it. The uci-defaults
+  script `nft-limiter-master` carries an old flag over once and deletes it.
+- **cgi-exec answers 200 with an empty body when the command fails** (it drops the exit
+  code), so `fs.exec_direct` output must be checked for content, never for null:
+  `nftctl.probe()` returns null unless the output holds a chain.
 - **Every rebuild is one nft transaction** and nothing stops-then-starts: a gap gives blocked
   devices seconds of internet. fw4 includes the rules through the symlink
   `/usr/share/nftables.d/table-post/30-nft-limiter.nft` → `/var/run/nft-limiter.fw4.nft`, so
@@ -65,6 +74,8 @@ commit messages; use `192.0.2.x` placeholders.
 
 ## Current state
 
+- v3.1.5 committed, not yet tagged: boot enable is the only on/off switch, LuCI's probe sees
+  an unloaded chain.
 - v3.1.4 released (shape mode, waste counter, family switches, stable loader, history that
   survives stop/start and firewall reloads). No open bugs.
 - Shape mode is proven on slow MIPS routers (MT7621): ~2.5% CPU at ~41 Mbit/s under load,
