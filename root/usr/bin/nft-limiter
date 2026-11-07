@@ -876,18 +876,19 @@ _collect_values() {
             V["R|" key[idx] "|" s] += b
         }
         END { for (k in V) print k "\t" V[k] }'
-    for name in $(_list_objects set); do
-        case "$name" in "${OBJ_PREFIX}acct_"*) ;; *) continue ;; esac
-        idx="${name#${OBJ_PREFIX}acct_}"; dir="${idx#*_}"; idx="${idx%%_*}"
-        if [ "$idx" = "def" ]; then key="default"; else
-            key=$(awk -F '\t' -v i="$idx" '$1 == i { print $2; exit }' "$KEYS_FILE" 2>/dev/null)
-            [ -n "$key" ] || continue
-        fi
-        case "$dir" in dl*) dir=d ;; *) dir=u ;; esac
-        nft list set inet "$NFT_TABLE" "$name" 2>/dev/null | tr '\n\t' '  ' \
-            | sed -n 's/.*elements = { \([^}]*\) }.*/\1/p' | tr ',' '\n' \
-            | awk -v k="$key" -v d="$dir" '{ for (i = 1; i < NF; i++) if ($i == "bytes") print "A|" k "|" $1 "|" d "\t" $(i + 1) }'
-    done
+    # Every per-address set from one listing (a command chain per set took
+    # 0.9 s for 12 sets on an MT7621; this takes 0.3 s).
+    nft list sets table inet "$NFT_TABLE" 2>/dev/null | awk -v kf="$KEYS_FILE" -v p="${OBJ_PREFIX}acct_" '
+        BEGIN { while ((getline l < kf) > 0) { split(l, a, "\t"); key[a[1]] = a[2] } key["def"] = "default" }
+        $1 == "set" { k = ""; if (index($2, p) != 1) next
+            idx = substr($2, length(p) + 1); dir = idx; sub(/_.*/, "", idx); sub(/^[^_]*_/, "", dir)
+            if (idx in key) { k = key[idx]; d = (dir ~ /^dl/) ? "d" : "u" }
+            next }
+        k != "" { s = $0
+            while (match(s, /[0-9a-fA-F.:]+ counter packets [0-9]+ bytes [0-9]+/)) {
+                split(substr(s, RSTART, RLENGTH), f, " "); print "A|" k "|" f[1] "|" d "\t" f[6]
+                s = substr(s, RSTART + RLENGTH) } }
+        /^[ \t]*}/ { k = "" }'
     # Shape mode: bytes each row's classes delivered (S|<row key>|d).
     if [ -s "$TAGS_FILE" ]; then
         tc -s class show dev "$SHAPE_DEV" 2>/dev/null | awk -v tf="$TAGS_FILE" '
@@ -898,14 +899,18 @@ _collect_values() {
             $1 == "Sent" && (cls in key) { V["S|" key[cls] "|d"] += $2 - 14 * $4 }
             END { for (k in V) print k "\t" V[k] }'
     fi
-    for i in $(uci -q get "${NAME}.@${NAME}[0].iface"); do
-        dev=$(ifstatus "$i" 2>/dev/null | jsonfilter -e '@.l3_device' 2>/dev/null)
-        [ -n "$dev" ] || continue
-        for f in rx tx; do
-            [ -r "/sys/class/net/$dev/statistics/${f}_bytes" ] && \
-                printf 'I|%s|%s\t%s\n' "$i" "$f" "$(cat "/sys/class/net/$dev/statistics/${f}_bytes")"
-        done
-    done
+    local ifs
+    ifs=$(uci -q get "${NAME}.@${NAME}[0].iface")
+    [ -n "$ifs" ] && ubus call network.interface dump 2>/dev/null \
+        | jsonfilter -e '@.interface[*]' 2>/dev/null | awk -v want=" $ifs " '
+            { if (!match($0, /"interface": *"[^"]*"/)) next
+              i = substr($0, RSTART, RLENGTH); sub(/^"interface": *"/, "", i); sub(/"$/, "", i)
+              if (!match($0, /"l3_device": *"[^"]*"/)) next
+              dv = substr($0, RSTART, RLENGTH); sub(/^"l3_device": *"/, "", dv); sub(/"$/, "", dv)
+              if (index(want, " " i " ")) for (n = 1; n <= 2; n++) {
+                  f = "/sys/class/net/" dv "/statistics/" (n == 1 ? "rx" : "tx") "_bytes"
+                  if ((getline v < f) > 0) printf "I|%s|%s\t%s\n", i, (n == 1 ? "rx" : "tx"), v
+                  close(f) } }'
 }
 
 # _acc_add <acc file> <bucket start> <closed log> -- add the delta line on
@@ -1073,22 +1078,28 @@ _quota_used() {
     local from now off
     now=$(date +%s); off=$(_tz_seconds)
     if [ "$2" = period ]; then from=$(_period_start); else from=$(( now - (now + off) % 86400 )); fi
-    _hist_records | awk -v F="$from" -v rk="R|$1|" '
+    _hist_records "$from" | awk -v F="$from" -v rk="R|$1|" '
         $2 >= F { for (j = 3; j <= NF; j++) if (index($j, rk) == 1 && $j !~ /^[^=]*\|w=/) { n = index($j, "="); s += substr($j, n + 1) } }
         END { printf "%d", s }'
 }
 
-# _hist_sum <from> <to> -- print "key<TAB>bytes" summed over [from, to),
-#   using the finest tier that covers each part, plus traffic since the
-#   last snapshot when <to> is now.
+# _hist_records [from] [to] [hour from] [hour to] -- the history records
+#   in [from, to) (+60 s for the 11-minute tier, as history reads it), each
+#   prefixed with its tier (86400, 3600, 0): daily before hourly_from, hourly
+#   before fine_from, 11-minute after, plus traffic since the last snapshot
+#   when <to> is within a minute of now. With an hour span, the closed hourly
+#   records in it stand in for the 11-minute lines they sum (the same bytes,
+#   a fifth of the lines).
 _hist_records() {
-    local fc=0 hc=0
+    local fc=0 hc=0 F=${1:-0} T=${2:-9999999999} H1=${3:-0} H2=${4:-0}
     [ -f "$HIST_DIR/fine.cut" ] && fc=$(cat "$HIST_DIR/fine.cut")
     [ -f "$HIST_DIR/hourly.cut" ] && hc=$(cat "$HIST_DIR/hourly.cut")
-    { [ -f "$HIST_DIR/daily.log" ] && awk -v c="$hc" '$1 < c { print 86400, $0 }' "$HIST_DIR/daily.log"
-      [ -f "$HIST_DIR/hourly.log" ] && awk -v c="$fc" '$1 < c { print 3600, $0 }' "$HIST_DIR/hourly.log"
-      [ -f "$HIST_DIR/fine.log" ] && awk '{ print 0, $0 }' "$HIST_DIR/fine.log"
-      if [ -f "$HIST_DIR/last.vals" ]; then
+    { [ -f "$HIST_DIR/daily.log" ] && awk -v c="$hc" -v F="$F" -v T="$T" '$1 < c && $1 >= F && $1 < T { print 86400, $0 }' "$HIST_DIR/daily.log"
+      [ -f "$HIST_DIR/hourly.log" ] && awk -v c="$fc" -v F="$F" -v T="$T" -v a="$H1" -v b="$H2" \
+          '($1 < c || ($1 >= a && $1 < b)) && $1 >= F && $1 < T { print 3600, $0 }' "$HIST_DIR/hourly.log"
+      [ -f "$HIST_DIR/fine.log" ] && awk -v F="$F" -v T="$T" -v a="$H1" -v b="$H2" \
+          '$1 >= F && $1 < T + 60 && ($1 < a || $1 >= b) { print 0, $0 }' "$HIST_DIR/fine.log"
+      if [ -f "$HIST_DIR/last.vals" ] && [ $(( T + 60 )) -gt "$(date +%s)" ]; then
           echo "0 $(_collect_values | _delta_line "$(date +%s)" "$HIST_DIR/last.vals")"
       fi; } 2>/dev/null
 }
@@ -1097,7 +1108,7 @@ _hist_records() {
 #   Stats tab: totals per key over the range, and per-bucket series for the
 #   row (R ... d/u) and interface (I ...) keys.
 history() {
-    local now off t0 from to base range bucket fc hc
+    local now off t0 from to base range bucket fc hc hs
     now=$(date +%s); off=$(_tz_seconds); t0=$(( now - (now + off) % 86400 ))
     case "$1" in
         today)      from=$t0; to=$now ;;
@@ -1121,18 +1132,42 @@ history() {
     base=660
     [ "$from" -lt "$fc" ] && base=3600
     [ "$from" -lt "$hc" ] && base=86400
-    range=$(( to - from )); bucket=$(( (range + 149) / 150 ))
+    # Bars of a whole size (at most 180): 11, 22 or 30 minutes, 1, 2, 3, 6
+    # or 12 hours, or whole days. A whole-hour bar reads the closed hourly
+    # records inside the range instead of their 11-minute lines.
+    range=$(( to - from )); bucket=$(( (range + 179) / 180 ))
     [ "$bucket" -lt "$base" ] && bucket=$base
-    _hist_records | awk -v F="$from" -v T="$to" -v B="$bucket" -v now="$now" -v fc="$fc" -v hc="$hc" -v first="${first:-0}" '
+    for b in 660 1320 1800 3600 7200 10800 21600 43200 86400; do
+        [ "$bucket" -le "$b" ] && { bucket=$b; break; }
+    done
+    [ "$bucket" -gt 86400 ] && bucket=$(( (bucket + 86399) / 86400 * 86400 ))
+    local h1=0 h2=0
+    if [ $(( bucket % 3600 )) -eq 0 ] && [ -s "$HIST_DIR/hour.acc" ]; then
+        h1=$(( from + (3600 - (from + off) % 3600) % 3600 ))   # the first whole hour
+        h2=$(( to - (to + off) % 3600 ))                       # the end of the last
+        hs=$(head -n 1 "$HIST_DIR/hour.acc")                    # the open hour
+        [ "$hs" -lt "$h2" ] && h2=$hs
+        [ "$h2" -le "$h1" ] && { h1=0; h2=0; }
+    fi
+    _hist_records "$from" "$to" "$h1" "$h2" | awk -v F="$from" -v T="$to" -v B="$bucket" -v now="$now" -v fc="$fc" -v hc="$hc" -v first="${first:-0}" '
         { t = $2; if (t < F || t >= T + ($1 == 0 ? 60 : 0)) next
           i = int((t - F) / B)
+          # A record in the minute after <to> (an 11-minute one, or the live
+          # read) counts in the last bar, as it does in the totals.
+          if (i >= int((T - F + B - 1) / B)) i = int((T - F + B - 1) / B) - 1
           split("", hasw); split("", ddv)
           for (j = 3; j <= NF; j++) {
               n = index($j, "="); k = substr($j, 1, n - 1); v = substr($j, n + 1) + 0
               tot[k] += v
-              if (k ~ /^R\|.*\|[du]$/ || k ~ /^I\|/) { ser[k, i] += v; sk[k] = 1 }
-              if (k ~ /\|w$/) hasw[substr(k, 1, length(k) - 2)] = 1
-              if (k ~ /^R\|.*\|dd$/) ddv[substr(k, 1, length(k) - 3)] = v
+              # One test per value, not four regexes: per-address (A) and
+              # tc (S) values only add to the totals.
+              c = substr(k, 1, 2)
+              if (c == "I|") { ser[k, i] += v; sk[k] = 1; continue }
+              if (c != "R|") continue
+              e = substr(k, n - 2)
+              if (e == "|d" || e == "|u") { ser[k, i] += v; sk[k] = 1 }
+              else if (e == "|w") hasw[substr(k, 1, n - 3)] = 1
+              else if (e == "dd" && substr(k, n - 3, 1) == "|") ddv[substr(k, 1, n - 4)] = v
           }
           # Records from before waste was recorded: dropped downloads are
           # the waste.

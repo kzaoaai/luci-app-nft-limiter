@@ -63,6 +63,19 @@ commit messages; use `192.0.2.x` placeholders.
 - History keys: `R|<row key>|d|u|dd|ud|w`, `S|<row key>|d` (tc delivered, minus 14 B per
   packet), `A|<row key>|<addr>|d|u`, `I|<iface>|rx|tx`. Row key = sorted targets joined by
   commas. Waste `w` = dropped downloads + (shape) arrived − delivered, signed per interval.
+- **Reading the history is cheap only if it stays this way** (measured on an MT7621, where a
+  7-day `history` took 3.1 s and now 1.1-1.2 s): `_hist_records` passes only the records in
+  the range; the live read (`_collect_values`) runs only when the range ends within a minute
+  of now; a whole-hour bar reads the closed hourly records inside the range in place of their
+  11-minute lines (an hourly record is exactly the sum of the 11-minute lines stamped in its
+  hour; the first line of `hour.acc` is the open hour, still 11-minute only); the main loop
+  makes one cheap test per value (per-address and tc values only add to totals); the live
+  read lists every per-address set with one `nft list sets` and the interfaces with one
+  `ubus` dump (a command chain per set cost 0.9 s for 12 sets). Bars are whole sizes (11, 22,
+  30 min, 1, 2, 3, 6, 12 h, days), at most 180, and a record in the minute after `<to>` counts
+  in the last bar as in the totals. Per-address values are about 70% of the logs; giving them
+  their own log would take a further ~40% off long ranges (estimate), at the cost of a format
+  change, and is not done.
 - The loader reads `nftlimiter/app.js` over RPC (`fs.read`, never cached) because LuCI
   stamps module URLs with its own version. Keep the loader unchanged between releases (a
   change needs a browser cache clear), keep `LUCI_MINIFY_JS:=0` (v3.0.x loaders expect one
@@ -76,6 +89,14 @@ commit messages; use `192.0.2.x` placeholders.
   snapshot never reads the new keys file against the old chain.
 
 ## Current state
+
+- v3.1.6 (2026-11-07): the faster `history` above (live read in one pass, one test per
+  value, only the records in range, closed hours for whole-hour bars, whole-size bars, the
+  last bar keeps the minute after `<to>`). Checked side by side against v3.1.5 on three
+  routers (an MT7621 and two Filogic), each on a frozen copy of its own history in `/tmp`:
+  identical totals for every closed range tried (seven per router), bars that add up to the
+  totals, the same live values. MT7621: today 1.2 to 0.6 s, 7 days 3.1 to 1.2 s, this
+  period 3.2 to 1.1 s, 45 days 4.5 to 2.7 s, the live read (also every snapshot) 0.9 to 0.3 s.
 
 - v3.1.5 released 2026-10-23: boot enable is the only on/off switch, LuCI's probe sees an
   unloaded chain. The flag migration has run on real upgrades with the flag at 1; the
