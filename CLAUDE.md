@@ -93,13 +93,13 @@ commit messages; use `192.0.2.x` placeholders.
 
 ## Current state
 
-- Unreleased (2026-11-12): **quota-only rules** (UCI `quota_only`, LuCI "Quota Only" in the Edit dialog).
+- v3.1.7 (2026-11-12): **quota-only rules** (UCI `quota_only`, LuCI "Quota Only" in the Edit dialog).
   A rule with no block and no speeds normally exempts its targets from everything after it (its
   terminal `accept`), the global limit included; with `quota_only` its pass rules count and carry no
   verdict, so until the quota is used up the next rule, else the global limit, applies. Past the
   quota the throttle (or block) works as for any quota. `coverageMap` no longer calls the rules after
   such a rule "never reached". Checked with a dry build (`nft -c`) against an MT7621's live config.
-  Also unreleased: **per-device quotas** (`quota_each`): a dynamic set `nftlim_qe_<idx>` whose elements
+  Also: **per-device quotas** (`quota_each`): a dynamic set `nftlim_qe_<idx>` whose elements
   carry their own quota (`update @set { ip daddr quota over N bytes }`; kernel and nft 1.1.6 count each
   element and honour a seeded `used`, tested on loopback), plus per-device throttle limit sets
   `nftlim_qel_<idx>_dl|ul`, so a throttle is policed per device even in shape mode. IPv4 only. Seeded from
@@ -112,12 +112,12 @@ commit messages; use `192.0.2.x` placeholders.
   started, so on a router with none the hook works after dnsmasq's next restart (the rebuild on a dhcp
   config change works at once). Accepted: a firewall reload restores per-device quota use as of the last
   rebuild, as it does for the shared quota objects.
-  Also unreleased (0c202ed): **waste in shape mode** was d - S, so a row whose downloads pass without a
+  Also (0c202ed): **waste in shape mode** was d - S, so a row whose downloads pass without a
   class tag (no speed limit: a quota-only rule, or a no-limit rule with a throttle quota, which v3.1.6 had
   too) showed every byte under its quota as waste. Unmarked download passes are now counted apart (`dn`,
   kept in `last.vals`, never in the history) and waste is d - dn - S; the interval in which `dn` first
   appears gets no class waste. Seen on an MT7621's two quota-only rules, whose stored `w` entries were
-  removed by hand the same day. Also unreleased: **a new row's first interval** was a baseline, so
+  removed by hand the same day. Also: **a new row's first interval** was a baseline, so
   what a new rule counted before its first snapshot never reached the history (that
   router's unreserved rule: about 1.2 GB in its quota, missing from its usage). The build now writes the row
   keys it carried nothing to (`/var/run/nft-limiter.fresh`) and `_delta_line` counts their missing
