@@ -32,8 +32,17 @@ commit messages; use `192.0.2.x` placeholders.
   `gh run list` and `gh release list` to that repo and shows its old runs and releases.
 - Install/upgrade on a router: `wget -qO- https://raw.githubusercontent.com/kzaoaai/luci-app-nft-limiter/main/install.sh | sh`.
   It refreshes package lists, installs `kmod-sched-core`, `kmod-ifb` and `tc-tiny` (unless a
-  `tc` exists) first, installs the package, `reapply`s (no firewall restart). Removes nothing;
-  delete `/etc/config/nft-limiter.apk-new` after upgrades.
+  `tc` exists) first, installs the package, then runs the service's `start` when enabled (an
+  atomic rebuild like `reapply`, no firewall restart, which also registers procd triggers a new
+  version adds). Removes nothing; delete `/etc/config/nft-limiter.apk-new` after upgrades.
+  Downloads use curl when installed, else the system wget, and fetch the package through the
+  API's asset address (`Accept: application/octet-stream`) before the browser link: OpenWrt's
+  own wget (uclient-fetch with ustream-mbedtls, 25.12) times out on github.com responses with
+  ~5.7 KB of headers, such as the browser link's redirect, while the API's redirect (~2 KB),
+  api.github.com and raw.githubusercontent.com work (seen 2026-11-12; a header-size limit in
+  uclient is inferred). If both fail it prints the link and the manual commands. The package's
+  post-upgrade ends in a bare `uci commit` (OpenWrt's default postinst after uci-defaults), which
+  saves whatever the uci CLI has staged in `/tmp/.uci` on that router.
 - Checks: `dash -n` and `ssh <router> 'sh -n' <` for shell; `node --check` for JS. Dry-run
   the engine against a router's live config: copy `nft-limiter` with `nft -f` → `nft -c -f`,
   `/var/run/nft-limiter.` → `/tmp/…`, the tc calls stubbed, and run `build_chain`
