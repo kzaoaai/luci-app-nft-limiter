@@ -131,7 +131,7 @@ function describeRule(dev) {
         if (dev.week && dev.week !== '0')
             when += ' ' + dev.week.split(',').map(function(d) { return DAY_NAMES[d] || d; }).join(',');
     }
-    var t = toList(dev.target).join(', ');
+    var t = toList(dev.target).map(targetLabel).join(', ');
     var name = dev.comment ? (dev.comment + ' (' + t + ')') : t;
     return name + ': ' + what + ', ' + when;
 }
@@ -228,12 +228,18 @@ function networkTargets(networks) {
     return out.sort(function(a, b) { return a.name < b.name ? -1 : a.name > b.name ? 1 : 0; });
 }
 
-// Accept a single IPv4/IPv6, a v4/v6 CIDR, or an IPv4 range a.b.c.d-e.f.g.h.
+// "unreserved": every address in the router's DHCP pools that no reservation
+// holds (the engine's _unres_lists). IPv4 only.
+var UNRES_LABEL = _('Unreserved devices');
+function targetLabel(t) { return t === 'unreserved' ? UNRES_LABEL : t; }
+
+// Accept a single IPv4/IPv6, a v4/v6 CIDR, or an IPv4 range a.b.c.d-e.f.g.h,
+// or "unreserved".
 // The backend (root/usr/bin/nft-limiter) handles all of these natively.
 function validateTarget(value) {
     if (!value) return true;
     var v = String(value).trim();
-    if (isIp4(v)) return true;
+    if (v === 'unreserved' || isIp4(v)) return true;
     var cidr = v.match(/^(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})\/(\d{1,2})$/);
     if (cidr && isIp4(cidr[1]) && +cidr[2] <= 32) return true;
     var rng = v.match(/^(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})-(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})$/);
@@ -538,6 +544,14 @@ function createUsage(hints) {
         try {
             (JSON.parse(lines[1] || '{}').nftables || []).forEach(function(it) { if (it.quota) quotas.push(it.quota); });
         } catch (e) {}
+        // Per-device quotas: {"qe":{"<row>":{"<address>":[used, quota]}}}, busiest 20 of each row.
+        try {
+            var qe = JSON.parse(lines[2] || '{}').qe || {};
+            Object.keys(qe).forEach(function(idx) {
+                Object.keys(qe[idx]).map(function(a) { return { name: 'nftlim_q_' + idx, addr: a, used: qe[idx][a][0], bytes: qe[idx][a][1] }; })
+                    .sort(function(a, b) { return b.used - a.used; }).slice(0, 20).forEach(function(q) { quotas.push(q); });
+            });
+        } catch (e) {}
         if (!data) {
             dom.content(box, E('div', { 'class': 'alert-message warning' },
                 _('No usage history yet. It starts recording when the limiter runs, about every 11 minutes.')));
@@ -653,7 +667,8 @@ function quotaTable(quotas) {
     var rows = quotas.filter(function(q) { return /^nftlim_q_\d+$/.test(q.name); }).map(function(q) {
         var dev = devs[+q.name.substr(9)] || {};
         var used = q.used || 0, limit = q.bytes || 0, pct = limit ? Math.min(100, used / limit * 100) : 0;
-        var label = dev.comment || toList(dev.target).join(', ');
+        // A per-device quota row (q.addr): one per device, from history's third line.
+        var label = (dev.comment || toList(dev.target).map(targetLabel).join(', ')) + (q.addr ? ' \u00b7 ' + q.addr : '');
         var action = dev.quota_action === 'throttle'
             ? _('then %s Mbit/s').format(dev.quota_rate || '1') : _('then blocked');
         return E('tr', { 'class': 'tr' }, [
@@ -1014,8 +1029,11 @@ return view.extend({
             }
             return a.val < b.val ? -1 : a.val > b.val ? 1 : 0;
         });
-        // Whole networks first, then devices.
-        var netNames = {};
+        // Unreserved devices, whole networks, then devices.
+        var netNames = { unreserved: UNRES_LABEL };
+        o.value('unreserved', E('span', { 'title': _('Every device on the DHCP pools without a reservation, followed as they come and go (IPv4)') }, [
+            E('strong', {}, UNRES_LABEL), ' \u2014 ' + _('any device without a reservation')
+        ]));
         networkTargets(networks).forEach(function(n) {
             netNames[n.val] = n.name;
             o.value(n.val, E('span', { 'title': _('Whole network') }, [
@@ -1025,6 +1043,7 @@ return view.extend({
         namedDevices.concat(unnamedDevices).forEach(function(d) { o.value(d.val, deviceLabel(d.label, d.ip)); });
         o.textvalue = function(section_id) {
             return toList(this.cfgvalue(section_id)).map(function(val) {
+                if (val === 'unreserved') return UNRES_LABEL;
                 if (netNames[val]) return netNames[val] + ' \u2014 ' + val;
                 var name = hints.getHostnameByIPAddr(val)
                         || hints.getHostnameByIP6Addr(val);
@@ -1119,6 +1138,9 @@ return view.extend({
         o.datatype = 'ufloat';
         o.placeholder = '1';
         o.depends('quota_action', 'throttle');
+        o = s.option(form.Flag, 'quota_each', _('Quota Per Device'),
+            _('For a rule covering several devices (a list, subnet, range or Unreserved devices): each device gets the whole quota and is throttled or blocked on its own once it is used up. Off: they share one quota. Counts IPv4 traffic.'));
+        o.modalonly = true;
         o = s.option(form.Flag, 'quota_only', _('Quota Only'),
             _('For a rule with no Block and no speeds: until the quota is used up, the device stays under the rule that would apply without this one (a broader rule, else the global limit) instead of being exempt from them.'));
         o.modalonly = true;

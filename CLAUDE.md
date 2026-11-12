@@ -96,6 +96,19 @@ commit messages; use `192.0.2.x` placeholders.
   verdict, so until the quota is used up the next rule, else the global limit, applies. Past the
   quota the throttle (or block) works as for any quota. `coverageMap` no longer calls the rules after
   such a rule "never reached". Checked with a dry build (`nft -c`) against an MT7621's live config.
+  Also unreleased: **per-device quotas** (`quota_each`): a dynamic set `nftlim_qe_<idx>` whose elements
+  carry their own quota (`update @set { ip daddr quota over N bytes }`; kernel and nft 1.1.6 count each
+  element and honour a seeded `used`, tested on loopback), plus per-device throttle limit sets
+  `nftlim_qel_<idx>_dl|ul`, so a throttle is policed per device even in shape mode. IPv4 only. Seeded from
+  the live set's elements across rebuilds (carry `E` lines), else the history's per-address `A` records;
+  flushed at the quota rollover; `history` prints them as a third line. And the **`unreserved` target**:
+  `nftlim_unres` (the DHCP pools: start/limit of each dhcp section with an interface, not ignored) less
+  `nftlim_res` (static hosts' ip, name-only hosts' current lease, the router's own address). `unresync`
+  rebuilds only when those lists changed (`/var/run/nft-limiter.unres`); it runs from the dhcp hotplug hook
+  and a procd config trigger on dhcp. dnsmasq calls hotplug.d/dhcp only if a script there existed when it
+  started, so on a router with none the hook works after dnsmasq's next restart (the rebuild on a dhcp
+  config change works at once). Accepted: a firewall reload restores per-device quota use as of the last
+  rebuild, as it does for the shared quota objects.
 
 - v3.1.6 (2026-11-07): the faster `history` above (live read in one pass, one test per
   value, only the records in range, closed hours for whole-hour bars, whole-size bars, the

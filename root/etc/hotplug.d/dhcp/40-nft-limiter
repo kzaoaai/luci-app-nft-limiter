@@ -1,0 +1,8 @@
+#!/bin/sh
+# A DHCP lease came, went or was renewed. The "unreserved" target leaves
+# out a name-only reservation's current lease, so a rule using it is
+# rebuilt when that changes (nft-limiter unresync rebuilds only then).
+# dnsmasq runs these hooks only if one existed when it started.
+case "$ACTION" in add|del|old|update) ;; *) exit 0 ;; esac
+grep -qs "'unreserved'" /etc/config/nft-limiter || exit 0
+/usr/bin/nft-limiter unresync >/dev/null 2>&1 &

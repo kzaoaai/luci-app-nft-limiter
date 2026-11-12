@@ -403,6 +403,21 @@ msgstr ""
 msgid "Quota Only"
 msgstr ""
 
+msgid "Unreserved devices"
+msgstr ""
+
+msgid "any device without a reservation"
+msgstr ""
+
+msgid "Every device on the DHCP pools without a reservation, followed as they come and go (IPv4)"
+msgstr ""
+
+msgid "Quota Per Device"
+msgstr ""
+
+msgid "For a rule covering several devices (a list, subnet, range or Unreserved devices): each device gets the whole quota and is throttled or blocked on its own once it is used up. Off: they share one quota. Counts IPv4 traffic."
+msgstr ""
+
 msgid "For a rule with no Block and no speeds: until the quota is used up, the device stays under the rule that would apply without this one (a broader rule, else the global limit) instead of being exempt from them."
 msgstr ""
 

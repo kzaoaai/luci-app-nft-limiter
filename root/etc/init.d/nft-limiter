@@ -63,6 +63,9 @@ restart() {
 
 service_triggers() {
     procd_add_reload_trigger 'nft-limiter'
+    # A reservation added or removed changes what the "unreserved" target
+    # covers; unresync rebuilds only when a rule uses it and it changed.
+    procd_add_config_trigger 'config.change' 'dhcp' /usr/bin/nft-limiter unresync
 }
 
 stop_service() {

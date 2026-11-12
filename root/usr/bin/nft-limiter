@@ -9,6 +9,13 @@
 #   List  : any mix of the above (UCI list, or space-separated) -> one
 #           rule per family matching an anonymous set, so every member
 #           shares the row's single limit, like a range or subnet does.
+#   unreserved : every address in the router's DHCP pools that is not a
+#           reserved device's (see _unres_lists). IPv4 only.
+#
+# Quotas: one counter per rule (all its members together), or with
+# 'quota_each 1' one per address (a dynamic set; IPv4 only), so each device
+# of a subnet, list or the unreserved target has its own allowance and is
+# throttled or blocked on its own once it is used up.
 #
 # IPv6 coverage for IPv4 hosts: a single-IPv4 target whose MAC is known
 # (UCI 'mac', a static DHCP host, the DHCP lease file, or the neighbour
@@ -66,6 +73,9 @@ HIST_HOURLY_DAYS=45
 HIST_DAILY_DAYS=400   # default; the "Keep history for (months)" setting overrides
 # UTC offset at the last build; the ntp hotplug hook rebuilds on a change.
 TZOFF_FILE="/var/run/nft-limiter.tzoff"
+# The unreserved target's pools and reserved addresses at the last build;
+# "unresync" rebuilds only when they changed.
+UNRES_FILE="/var/run/nft-limiter.unres"
 OBJ_PREFIX="nftlim_"
 
 _iface_set=""
@@ -158,6 +168,7 @@ _resolve_mac() {
 _target_addr_count() {
     local t="$1" s e si ei pfx
     case "$t" in
+        unreserved) echo 4294967290 ;;   # after every IPv4 subnet or range
         *-*)   # IPv4 range  start-end
             s="${t%%-*}"; e="${t##*-}"
             si=$(_ip4_to_int "$s") || { echo 4294967296; return; }
@@ -176,6 +187,85 @@ _target_addr_count() {
         *)     # single host (IPv4 or IPv6)
             echo 1 ;;
     esac
+}
+
+# -----------------------------------------------------------------------
+# _int_to_ip4 <int> -- dotted quad.
+# -----------------------------------------------------------------------
+_int_to_ip4() {
+    awk -v n="$1" 'BEGIN { printf "%d.%d.%d.%d", int(n / 16777216) % 256, int(n / 65536) % 256, int(n / 256) % 256, n % 256 }'
+}
+
+# -----------------------------------------------------------------------
+# _unres_lists -- what the "unreserved" target covers, one item a line,
+#   sorted: "P <a>-<b>" for each DHCP pool (a dhcp section with an
+#   interface, not ignored, dynamic; start and limit as dnsmasq reads them,
+#   inside the interface's IPv4 subnet) and "R <ip>" for each address that
+#   is not unknown: a static host's ip, a name-only host's current lease
+#   (by any of its MACs), the router's own address on that network. One
+#   'uci show' and one pass over the lease file, so it is cheap enough for
+#   every DHCP lease event.
+# -----------------------------------------------------------------------
+_unres_lists() {
+    local s ifc ign dyn start limit st a ai k
+    uci -q show dhcp | awk -v lf=/tmp/dhcp.leases '
+        function d(v) { return v == "" ? "-" : v }
+        BEGIN { while ((getline l < lf) > 0) { split(l, f, " "); lease[tolower(f[2])] = f[3] } }
+        { line = $0; sub(/^dhcp\./, "", line); eq = index(line, "="); k = substr(line, 1, eq - 1); v = substr(line, eq + 1)
+          gsub(/\047/, "", v) }
+        k !~ /\./ { type[k] = v; next }
+        { sec = substr(k, 1, index(k, ".") - 1); opt = substr(k, index(k, ".") + 1); val[sec, opt] = v }
+        END {
+            for (sec in type) {
+                if (type[sec] != "host") continue
+                ip = val[sec, "ip"]
+                if (ip ~ /^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$/) { print "R " ip; continue }
+                n = split(val[sec, "mac"], m, " ")
+                for (i = 1; i <= n; i++) if (tolower(m[i]) in lease) print "R " lease[tolower(m[i])]
+            }
+            # "-" for an option not set, so the fields stay in place for read
+            for (sec in type) if (type[sec] == "dhcp")
+                print "D", sec, d(val[sec, "interface"]), d(val[sec, "ignore"]), d(val[sec, "dynamicdhcp"]), d(val[sec, "start"]), d(val[sec, "limit"])
+        }' | while read -r k s ifc ign dyn start limit; do
+            case "$k" in R) echo "R $s"; continue ;; esac
+            [ "$ifc" != - ] || continue
+            [ "$ign" = 1 ] || [ "$dyn" = 0 ] && continue
+            [ "$start" = - ] && start=""; [ "$limit" = - ] && limit=""
+            st=$(ubus call "network.interface.$ifc" status 2>/dev/null \
+                | jsonfilter -e '@["ipv4-address"][0].address' -e '@["ipv4-address"][0].mask' 2>/dev/null | tr '\n' ' ')
+            set -- $st
+            [ -n "$2" ] || continue
+            ai=$(_ip4_to_int "$1") || continue
+            echo "R $1"
+            awk -v ip="$ai" -v bits="$2" -v st="${start:-100}" -v lim="${limit:-150}" 'BEGIN {
+                size = 2 ^ (32 - bits); net = ip - (ip % size); a = net + st; b = a + lim - 1
+                if (b > net + size - 2) b = net + size - 2; if (a <= net) a = net + 1
+                if (st ~ /^[0-9]+$/ && lim ~ /^[0-9]+$/ && a <= b) printf "%d %d\n", a, b }' | while read -r a b; do
+                echo "P $(_int_to_ip4 "$a")-$(_int_to_ip4 "$b")"
+            done
+        done | sort -u
+}
+
+# _unres_sets <lists file> -- the two sets the unreserved target matches.
+_unres_sets() {
+    local p r
+    p=$(awk '$1 == "P" { printf "%s%s", s, $2; s = ", " }' "$1")
+    r=$(awk '$1 == "R" { printf "%s%s", s, $2; s = ", " }' "$1")
+    [ -n "$p" ] && p=" elements = { $p };"
+    [ -n "$r" ] && r=" elements = { $r };"
+    printf '    set %sunres { type ipv4_addr; flags interval; auto-merge;%s }\n' "$OBJ_PREFIX" "$p"
+    printf '    set %sres { type ipv4_addr; flags interval; auto-merge;%s }\n' "$OBJ_PREFIX" "$r"
+}
+
+# unresync -- after a DHCP lease event or a dhcp config change: rebuild if
+#   an enabled rule uses the unreserved target and its lists changed.
+unresync() {
+    local cur
+    [ -f "$NFT_FILE" ] || return 0
+    uci -q show "$NAME" | grep -q "\.target=.*'unreserved'" || return 0
+    cur=$(_unres_lists)
+    [ "$cur" = "$(cat "$UNRES_FILE" 2>/dev/null)" ] && return 0
+    start
 }
 
 # -----------------------------------------------------------------------
@@ -241,6 +331,13 @@ _snapshot_counters() {
               }
               if (idx != "" && (idx in key)) printf "Q\t%s\t%s\n", key[idx], u + 0
               idx = ""; u = 0 }' >> "$_carry_file"
+    # Per-device quotas: "E <row key> <address> <bytes used>".
+    for name in $(_list_objects set); do
+        case "$name" in "${OBJ_PREFIX}qe_"*) ;; *) continue ;; esac
+        key=$(awk -F '\t' -v i="${name#${OBJ_PREFIX}qe_}" '$1 == i { print $2; exit }' "$KEYS_FILE")
+        [ -n "$key" ] || continue
+        _qe_elements "$name" | awk -v k="$key" '{ printf "E\t%s\t%s\t%s\n", k, $1, $2 }' >> "$_carry_file"
+    done
     for name in $(_list_objects set); do
         case "$name" in "${OBJ_PREFIX}acct_"*) ;; *) continue ;; esac
         idx="${name#${OBJ_PREFIX}acct_}"; dir="${idx#*_}"; idx="${idx%%_*}"
@@ -293,6 +390,19 @@ _markset() {
 _dir_lines() {
     local tag="$1" match="$2" prefix="$3" kb="$4" block="$5" lname="$6"
     local t="${tag#*_}"
+    # Per-device quota (quota_each): each address's own quota element, and
+    # its own throttle limit element; IPv4 only. Placed first, like the
+    # rule's shared quota below.
+    if [ -n "$_qe_name" ] && [ "$block" != "1" ]; then
+        case "$t" in dl|ul)
+            local key="ip daddr" thr=""
+            [ "$t" = ul ] && key="ip saddr"
+            [ -n "$_q_throttle" ] && thr="update @${OBJ_PREFIX}qel_${tag%%_*}_${t} { $key limit rate over ${_q_rate_kb} kbytes/second burst $(_burst "$_q_rate_kb") kbytes } "
+            _counter "${t}_q"
+            printf '        %s %supdate @%s { %s quota over %s bytes } %s%s drop comment "dev_%s_q"\n' \
+                "$match" "$prefix" "$_qe_name" "$key" "$_qe_bytes" "$thr" "$_ctr" "$tag"
+        ;; esac
+    fi
     # Quota: a rule that consumes the row's quota and, once it is used up,
     # drops (block) or drops above the throttle rate (throttle). Placed
     # first, so each packet counts against the quota once.
@@ -349,11 +459,12 @@ _dir_lines() {
 _rule_lines() {
     local idx="$1" targets="$2" dl_kb="$3" ul_kb="$4" block="$5" macs="$6"
     local time_expr="$7" day_expr="$8"
-    local prefix="" kb t v4="" v6="" mac set
+    local prefix="" kb t v4="" v6="" mac set unres=""
     [ -n "$time_expr" ] && prefix="${time_expr} "
     [ -n "$day_expr"  ] && prefix="${prefix}${day_expr} "
     for t in $targets; do
         case "$t" in
+            unreserved) unres=1 ;;
             *:*) v6="${v6:+$v6, }$t" ;;
             *)   v4="${v4:+$v4, }$t" ;;
         esac
@@ -361,14 +472,15 @@ _rule_lines() {
 
     # Shape mode: this rule's download class (tag = index + 1) and, with a
     # throttle quota, its throttle class (tag + 127). Rules past index 126
-    # stay policed.
+    # stay policed. A per-device quota throttles each device on its own,
+    # policed (a class per device cannot be made on the fly).
     _stag=""; _qtag=""
     if [ "$_shape" = 1 ] && [ "$block" != "1" ] && [ "$idx" -lt 127 ]; then
         if [ "$dl_kb" -gt 0 ] 2>/dev/null; then
             _stag=$(( idx + 1 ))
             echo "$_stag $(( dl_kb * 8 )) $_rowkey" >> "$_tags_new"
         fi
-        if [ -n "$_q_throttle" ]; then
+        if [ -n "$_q_throttle" ] && [ -z "$_qe_name" ]; then
             _qtag=$(( idx + 128 ))
             echo "$_qtag $(( _q_rate_kb * 8 )) $_rowkey" >> "$_tags_new"
         fi
@@ -394,11 +506,20 @@ _rule_lines() {
     # Rows covering several addresses (subnet, range, list) also count per
     # address, for the Stats breakdown. No verdict, so placed first.
     local acct="${OBJ_PREFIX}acct_${idx}"
-    case "$v4" in *[,/-]*)
+    # The unreserved target: the DHCP pools, less the reserved devices.
+    local um_in="$in_if ip daddr @${OBJ_PREFIX}unres ip daddr != @${OBJ_PREFIX}res"
+    local um_out="$out_if ip saddr @${OBJ_PREFIX}unres ip saddr != @${OBJ_PREFIX}res"
+    case "$v4" in *[,/-]*) ;; *) [ -n "$unres" ] ;; esac && {
         _acct_set "${acct}_dl" ipv4_addr dl; _acct_set "${acct}_ul" ipv4_addr ul
+    }
+    case "$v4" in *[,/-]*)
         printf '        %s ip daddr %s %supdate @%s_dl { ip daddr } comment "dev_%s_acct"\n' "$in_if" "$v4" "$prefix" "$acct" "$idx"
         printf '        %s ip saddr %s %supdate @%s_ul { ip saddr } comment "dev_%s_acct"\n' "$out_if" "$v4" "$prefix" "$acct" "$idx"
     ;; esac
+    if [ -n "$unres" ]; then
+        printf '        %s %supdate @%s_dl { ip daddr } comment "dev_%s_acct"\n' "$um_in" "$prefix" "$acct" "$idx"
+        printf '        %s %supdate @%s_ul { ip saddr } comment "dev_%s_acct"\n' "$um_out" "$prefix" "$acct" "$idx"
+    fi
     case "$v6" in *[,/]*)
         _acct_set "${acct}_dl6" ipv6_addr dl6; _acct_set "${acct}_ul6" ipv6_addr ul6
         printf '        %s ip6 daddr %s %supdate @%s_dl6 { ip6 daddr } comment "dev_%s_acct"\n' "$in_if" "$v6" "$prefix" "$acct" "$idx"
@@ -407,6 +528,10 @@ _rule_lines() {
     if [ -n "$v4" ]; then
         _dir_lines "${idx}_dl" "$in_if ip daddr $v4" "$prefix" "$dl_kb" "$block" "$ldl"
         _dir_lines "${idx}_ul" "$out_if ip saddr $v4" "$prefix" "$ul_kb" "$block" "$lul"
+    fi
+    if [ -n "$unres" ]; then
+        _dir_lines "${idx}_dl" "$um_in" "$prefix" "$dl_kb" "$block" "$ldl"
+        _dir_lines "${idx}_ul" "$um_out" "$prefix" "$ul_kb" "$block" "$lul"
     fi
     if [ -n "$v6" ]; then
         _dir_lines "${idx}_dl6" "$in_if ip6 daddr $v6" "$prefix" "$dl_kb" "$block" "$ldl"
@@ -578,9 +703,29 @@ _emit_device() {
     qper=$(uci -q get "${NAME}.@device[${idx}].quota_period"); qper=${qper:-day}
     qact=$(uci -q get "${NAME}.@device[${idx}].quota_action"); qact=${qact:-block}
     qrate=$(uci -q get "${NAME}.@device[${idx}].quota_rate")
-    _q_name=""; _q_throttle=""
+    _q_name=""; _q_throttle=""; _qe_name=""
     qb=$(awk -v g="${quota:-0}" 'BEGIN { printf "%.0f", g * 1000000000 }')
-    if [ "$qb" -gt 0 ] 2>/dev/null && [ "${block:-0}" != 1 ]; then
+    local cnt=0 els
+    for t in $target; do cnt=$(( cnt + $(_target_addr_count "$t") )); done
+    if [ "$qb" -gt 0 ] 2>/dev/null && [ "${block:-0}" != 1 ] && [ "$cnt" -gt 1 ] \
+            && [ "$(uci -q get "${NAME}.@device[${idx}].quota_each")" = 1 ]; then
+        # One quota per address: a dynamic set whose elements carry their own
+        # quota, seeded with each address's use this period (live set, else
+        # the history's per-address records), plus per-address throttles.
+        _qe_name="${OBJ_PREFIX}qe_${idx}"; _qe_bytes=$qb
+        els=$(awk -F '\t' -v k="$_rowkey" '$1 == "E" && $2 == k { print $3, $4 }' "$_carry_file")
+        [ -n "$els" ] || els=$(_quota_used_addrs "$_rowkey" "$qper")
+        els=$(echo "$els" | awk -v q="$qb" 'NF == 2 && $2 > 0 && !seen[$1]++ { printf "%s%s quota over %s bytes used %d bytes", s, $1, q, $2; s = ", " }')
+        [ -n "$els" ] && els=" elements = { $els };"
+        printf '    set %s { type ipv4_addr; flags dynamic; size 4096;%s }\n' "$_qe_name" "$els" >> "$_obj_file"
+        if [ "$qact" = throttle ]; then
+            _q_throttle=1
+            _q_rate_kb=$(_mbit_to_kb "${qrate:-1}")
+            for t in dl ul; do
+                printf '    set %sqel_%s_%s { type ipv4_addr; flags dynamic; size 4096; }\n' "$OBJ_PREFIX" "$idx" "$t" >> "$_obj_file"
+            done
+        fi
+    elif [ "$qb" -gt 0 ] 2>/dev/null && [ "${block:-0}" != 1 ]; then
         _q_name="${OBJ_PREFIX}q_${idx}"
         qused=$(awk -F '\t' -v k="$_rowkey" '$1 == "Q" && $2 == k { print $3; exit }' "$_carry_file")
         [ -n "$qused" ] || qused=$(_quota_used "$_rowkey" "$qper")
@@ -719,6 +864,12 @@ build_chain() {
         done >> "$rules_file"
     fi
     rm -f "$_order_list"
+    # The unreserved target's two sets, when a rule uses it.
+    rm -f "${UNRES_FILE}.new"
+    if grep -q "@${OBJ_PREFIX}unres" "$rules_file"; then
+        _unres_lists > "${UNRES_FILE}.new"
+        _unres_sets "${UNRES_FILE}.new" >> "$_obj_file"
+    fi
 
     local def_glimit def_sched def_dl def_ul def_dl_kb def_ul_kb def_ts def_te def_week
     def_glimit=$(uci -q get "${NAME}.@${NAME}[0].glimit")
@@ -794,6 +945,7 @@ build_chain() {
     nft -f "$NFT_FILE" || return 1
     mv "${FW4_BODY}.new" "$FW4_BODY"
     mv "${KEYS_FILE}.new" "$KEYS_FILE"
+    if [ -f "${UNRES_FILE}.new" ]; then mv "${UNRES_FILE}.new" "$UNRES_FILE"; else rm -f "$UNRES_FILE"; fi
     date +%z > "$TZOFF_FILE"
 }
 
@@ -823,7 +975,7 @@ stop() {
     for name in $(_list_objects set); do
         nft delete set inet "${NFT_TABLE}" "$name" 2>/dev/null
     done
-    rm -f "$NFT_FILE" "$TZOFF_FILE" "$FW4_BODY" "$KEYS_FILE"
+    rm -f "$NFT_FILE" "$TZOFF_FILE" "$FW4_BODY" "$KEYS_FILE" "$UNRES_FILE"
 }
 
 status() {
@@ -1082,6 +1234,14 @@ _quota_rollover() {
             nft reset quota inet "$NFT_TABLE" "$name" >/dev/null 2>&1
         fi
     done
+    for name in $(_list_objects set); do
+        case "$name" in "${OBJ_PREFIX}qe_"*) ;; *) continue ;; esac
+        idx="${name#${OBJ_PREFIX}qe_}"
+        per=$(uci -q get "${NAME}.@device[${idx}].quota_period")
+        if [ "${per:-day}" = day ] || [ "$today" = "$pd" ]; then
+            nft flush set inet "$NFT_TABLE" "$name" >/dev/null 2>&1
+        fi
+    done
 }
 
 # _quota_used <row key> <period> -- bytes the row used since its quota
@@ -1094,6 +1254,36 @@ _quota_used() {
     _hist_records "$from" | awk -v F="$from" -v rk="R|$1|" '
         $2 >= F { for (j = 3; j <= NF; j++) if (index($j, rk) == 1 && $j !~ /^[^=]*\|w=/) { n = index($j, "="); s += substr($j, n + 1) } }
         END { printf "%d", s }'
+}
+
+# _quota_used_addrs <row key> <period> -- "<address> <bytes>" for each
+#   address of the row since its quota period began, from the history's
+#   per-address records (rows with several addresses keep them). Seeds a
+#   per-device quota that has no live set.
+_quota_used_addrs() {
+    local from now off
+    now=$(date +%s); off=$(_tz_seconds)
+    if [ "$2" = period ]; then from=$(_period_start); else from=$(( now - (now + off) % 86400 )); fi
+    _hist_records "$from" | awk -v F="$from" -v ak="A|$1|" '
+        $2 >= F { for (j = 3; j <= NF; j++) if (index($j, ak) == 1) {
+            n = index($j, "="); k = substr($j, length(ak) + 1, n - length(ak) - 1); sub(/\|[du]$/, "", k)
+            s[k] += substr($j, n + 1) } }
+        END { for (a in s) printf "%s %d\n", a, s[a] }'
+}
+
+# _qe_elements <set> -- "<address> <bytes used> <quota bytes>" for each
+#   element of a per-device quota set (nft prints sizes in whole b/k/m/g).
+_qe_elements() {
+    nft list set inet "$NFT_TABLE" "$1" 2>/dev/null | tr '\n\t' '  ' \
+        | sed -n 's/.*elements = { \([^}]*\) }.*/\1/p' | tr ',' '\n' | awk '
+        function b(n, u) { return n * (u ~ /^k/ ? 1024 : u ~ /^m/ ? 1048576 : u ~ /^g/ ? 1073741824 : 1) }
+        { a = ""; o = 0; u = 0
+          for (i = 1; i <= NF; i++) {
+              if ($i ~ /^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$/) a = $i
+              if ($i == "over") o = b($(i + 1), $(i + 2))
+              if ($i == "used") u = b($(i + 1), $(i + 2))
+          }
+          if (a != "") printf "%s %.0f %.0f\n", a, u, o }'
 }
 
 # _hist_records [from] [to] [hour from] [hour to] -- the history records
@@ -1199,6 +1389,16 @@ history() {
         }'
     # Second line: the live quota objects, for the quota bars.
     nft -j list quotas table inet "$NFT_TABLE" 2>/dev/null || echo '{}'
+    # Third line: per-device quotas, {"qe":{"<row index>":{"<address>":[used, quota]}}}.
+    local name sep="" first
+    printf '{"qe":{'
+    for name in $(_list_objects set); do
+        case "$name" in "${OBJ_PREFIX}qe_"*) ;; *) continue ;; esac
+        printf '%s"%s":{' "$sep" "${name#${OBJ_PREFIX}qe_}"; sep=","
+        _qe_elements "$name" | awk '{ printf "%s\"%s\":[%s,%s]", s, $1, $2, $3; s = "," }'
+        printf '}'
+    done
+    echo '}}'
 }
 
 # stats -- for the LuCI Stats tab, one JSON document per line: the chain
@@ -1234,6 +1434,7 @@ case "$1" in
     stats)  stats ;;
     snapshot) snapshot ;;
     tcsync)   _tc_attach ;;
+    unresync) unresync ;;
     history)  shift; history "$@" ;;
     *)      start ;;
 esac
