@@ -1033,7 +1033,13 @@ _collect_values() {
             if (!match(c, /^dev_[0-9]+_/)) next
             idx = substr(c, 5, RLENGTH - 5); t = substr(c, RLENGTH + 1)
             if (!(idx in key)) next
-            if (t ~ /^dl6?_(q)?pass$/) s = "d"
+            if (t ~ /^dl6?_(q)?pass$/) {
+                s = "d"
+                # A download pass that tags no class (a rule with no speed
+                # limit, quota-only or not) never reaches the classes of the
+                # row, so the waste sum must not expect it there.
+                if (!/ mark set /) V["R|" key[idx] "|dn"] += b
+            }
             else if (t ~ /^ul6?_(q)?pass$/) s = "u"
             else if (t ~ /^dl/) s = "dd"
             else if (t ~ /^ul/) s = "ud"
@@ -1129,7 +1135,9 @@ _hist_restore() {
 #   stdin and print "<now> key=delta ..." for the non-zero deltas (a value
 #   that went down was reset, so its delta is the new value). Adds each
 #   row's download waste, R|<row key>|w: dropped downloads (dd), plus in
-#   shape mode what arrived but its classes did not deliver (d - S).
+#   shape mode what was sent to its classes but they did not deliver
+#   (d - dn - S; dn = downloads passed without a class tag, which go on to
+#   a later rule or the global limit). dn is not written to the history.
 _delta_line() {
     awk -v now="$1" -v lf="$2" -F '\t' '
         BEGIN { while ((getline l < lf) > 0) { split(l, a, "\t"); last[a[1]] = a[2] } }
@@ -1155,11 +1163,15 @@ _delta_line() {
             # sums over a range are meaningful (the UI clamps those at 0).
             for (rk in R) {
                 w = D["R|" rk "|dd"] + 0
-                if (("S|" rk "|d") in P) w += D["R|" rk "|d"] - D["S|" rk "|d"]
+                # dn new this time (an upgrade, a new row): what part of d
+                # went to the classes is unknown, so no class waste yet.
+                dn = "R|" rk "|dn"
+                if (("S|" rk "|d") in P && !((dn in P) && !(dn in D)))
+                    w += D["R|" rk "|d"] - D[dn] - D["S|" rk "|d"]
                 if (w != 0) D["R|" rk "|w"] = w
             }
             out = now
-            for (k in D) if (D[k] > 0 || (k ~ /\|w$/ && D[k] != 0)) out = out " " k "=" D[k]
+            for (k in D) if (k !~ /\|dn$/ && (D[k] > 0 || (k ~ /\|w$/ && D[k] != 0))) out = out " " k "=" D[k]
             print out
         }'
 }
