@@ -84,8 +84,11 @@ commit messages; use `192.0.2.x` placeholders.
   `_delta_line` a key missing from the last snapshot, or a counter that went down, is a
   baseline, never traffic: before v3.1.4 a stop/start or upgrade, and every firewall reload
   (fw4 re-reads the include file, whose counters are frozen at the last rebuild), re-counted
-  each rule's whole total as one interval. And
-  every command but `status`/`stats` holds `flock` on `/var/lock/nft-limiter.lock`, so a
+  each rule's whole total as one interval. The exception is a row the last build carried no
+  counter to (a new rule, a changed target list, every row after a start): the build lists
+  those row keys in `/var/run/nft-limiter.fresh`, and a key of theirs the last snapshot lacks
+  (`R` or per-address `A`) is counted from zero, since their counters and sets began at zero.
+  And every command but `status`/`stats` holds `flock` on `/var/lock/nft-limiter.lock`, so a
   snapshot never reads the new keys file against the old chain.
 
 ## Current state
@@ -109,6 +112,18 @@ commit messages; use `192.0.2.x` placeholders.
   started, so on a router with none the hook works after dnsmasq's next restart (the rebuild on a dhcp
   config change works at once). Accepted: a firewall reload restores per-device quota use as of the last
   rebuild, as it does for the shared quota objects.
+  Also unreleased (0c202ed): **waste in shape mode** was d - S, so a row whose downloads pass without a
+  class tag (no speed limit: a quota-only rule, or a no-limit rule with a throttle quota, which v3.1.6 had
+  too) showed every byte under its quota as waste. Unmarked download passes are now counted apart (`dn`,
+  kept in `last.vals`, never in the history) and waste is d - dn - S; the interval in which `dn` first
+  appears gets no class waste. Seen on an MT7621's two quota-only rules, whose stored `w` entries were
+  removed by hand the same day. Also unreleased: **a new row's first interval** was a baseline, so
+  what a new rule counted before its first snapshot never reached the history (that
+  router's unreserved rule: about 1.2 GB in its quota, missing from its usage). The build now writes the row
+  keys it carried nothing to (`/var/run/nft-limiter.fresh`) and `_delta_line` counts their missing
+  keys from zero. Tested on synthetic snapshots (macOS awk and busybox) and read-only on that router:
+  with no fresh file the delta is identical to before, and a reload there now marks no row fresh.
+  A new address in an existing multi-address row is still a baseline for its first interval.
 
 - v3.1.6 (2026-11-07): the faster `history` above (live read in one pass, one test per
   value, only the records in range, closed hours for whole-hour bars, whole-size bars, the
