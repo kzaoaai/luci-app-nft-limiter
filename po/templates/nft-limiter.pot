@@ -241,6 +241,9 @@ msgstr ""
 msgid "no limit"
 msgstr ""
 
+msgid "quota only, otherwise as the next rule"
+msgstr ""
+
 msgid "Global Limit (Mbit/s)"
 msgstr ""
 
@@ -395,6 +398,12 @@ msgid "Throttle"
 msgstr ""
 
 msgid "Throttle To (Mbit/s)"
+msgstr ""
+
+msgid "Quota Only"
+msgstr ""
+
+msgid "For a rule with no Block and no speeds: until the quota is used up, the device stays under the rule that would apply without this one (a broader rule, else the global limit) instead of being exempt from them."
 msgstr ""
 
 msgid "Live"

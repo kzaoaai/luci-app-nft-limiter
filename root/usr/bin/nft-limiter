@@ -287,7 +287,8 @@ _markset() {
 # -----------------------------------------------------------------------
 # _dir_lines <tag> <match> <prefix> <kb> <block> <limit_name>
 #   One direction of one device: a drop rule (block), or a limit-over-drop
-#   rule plus the terminal pass-through accept. Comment dev_<tag>[_pass].
+#   rule plus the terminal pass-through accept (a counter only, no verdict,
+#   for a quota-only rule). Comment dev_<tag>[_pass].
 # -----------------------------------------------------------------------
 _dir_lines() {
     local tag="$1" match="$2" prefix="$3" kb="$4" block="$5" lname="$6"
@@ -329,6 +330,12 @@ _dir_lines() {
             "$match" "$prefix" "$lname" "$_ctr" "$tag"
     fi
     _counter "${t}_pass"
+    if [ -n "$_q_only" ]; then
+        # Quota only: count what got past the quota and go on, so the rules
+        # after this one (a broader rule, else the global limit) still apply.
+        printf '        %s %s%s comment "dev_%s_pass"\n' "$match" "$prefix" "$_ctr" "$tag"
+        return
+    fi
     printf '        %s %s%s accept comment "dev_%s_pass"\n' "$match" "$prefix" "$_ctr" "$tag"
 }
 
@@ -562,6 +569,12 @@ _emit_device() {
     # plus throttle limits when the action is to slow down, not block.
     local quota qper qact qrate qused qb
     quota=$(uci -q get "${NAME}.@device[${idx}].quota")
+    # Quota only (no block, no speeds): the rule adds its quota and nothing
+    # else; until the quota is used up the device is left to the rules
+    # after it, as if this one were not there, instead of being exempt.
+    _q_only=""
+    [ "$(uci -q get "${NAME}.@device[${idx}].quota_only")" = 1 ] && [ "${block:-0}" != 1 ] \
+        && [ "$dl_kb" = 0 ] && [ "$ul_kb" = 0 ] && _q_only=1
     qper=$(uci -q get "${NAME}.@device[${idx}].quota_period"); qper=${qper:-day}
     qact=$(uci -q get "${NAME}.@device[${idx}].quota_action"); qact=${qact:-block}
     qrate=$(uci -q get "${NAME}.@device[${idx}].quota_rate")

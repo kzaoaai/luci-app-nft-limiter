@@ -90,6 +90,13 @@ commit messages; use `192.0.2.x` placeholders.
 
 ## Current state
 
+- Unreleased (2026-11-12): **quota-only rules** (UCI `quota_only`, LuCI "Quota Only" in the Edit dialog).
+  A rule with no block and no speeds normally exempts its targets from everything after it (its
+  terminal `accept`), the global limit included; with `quota_only` its pass rules count and carry no
+  verdict, so until the quota is used up the next rule, else the global limit, applies. Past the
+  quota the throttle (or block) works as for any quota. `coverageMap` no longer calls the rules after
+  such a rule "never reached". Checked with a dry build (`nft -c`) against an MT7621's live config.
+
 - v3.1.6 (2026-11-07): the faster `history` above (live read in one pass, one test per
   value, only the records in range, closed hours for whole-hour bars, whole-size bars, the
   last bar keeps the minute after `<to>`). Checked side by side against v3.1.5 on three

@@ -19,7 +19,7 @@ Fast, minimal-CPU per-device bandwidth control for OpenWrt using native **nftabl
 - **Block toggle** — drop a device's WAN traffic outright (both directions), optionally on its schedule
 - **IPv6 aware** — a single-IPv4 device with a known MAC is also matched on IPv6 (upload by MAC, download by its learned global addresses), sharing one limit across both families; IPv6 addresses and prefixes work as targets too
 - **Usage history** — tiered history kept on the router (≈11-minute detail for 7 days, hourly for 45 days, daily for 13 months; saved to flash daily and at shutdown) with a range picker (today, yesterday, 7 days, this/last billing period, custom), per-rule trends, per-device breakdowns and per-uplink totals to compare with your ISP's counter
-- **Quotas** — per-rule data allowance per day or per billing period, then block or throttle
+- **Quotas** — per-rule data allowance per day or per billing period, then block or throttle; a quota-only rule (no block, no speeds) leaves the device under the global limit or a broader rule until its quota is used up
 - **Family switches** — give a rule a switch name and a limited login (e.g. an iOS Shortcut on someone's phone) can see its state, turn its block on or off and change its hours, and nothing else. See *Family switches* below.
 - **Time scheduling** — time-of-day and day-of-week windows, both per-rule and for the global default limit
 - **Live stats** — current speed per rule, totals that survive rule changes, dropped traffic, a tint on rules that are limiting right now, and a per-device breakdown for subnet/range/multi-device rules and for the global limit (top talkers)
@@ -77,6 +77,7 @@ config device
     option quota_period day            # day | period (billing period)
     option quota_action throttle       # block | throttle
     option quota_rate 1                # Mbit/s once used up (throttle)
+    option quota_only 1                # no block or speeds: until used up, the next rule or the global limit applies
     option mac       aa:bb:cc:dd:ee:01 # optional; LuCI fills it on save. Enables IPv6 matching
                                        # (otherwise looked up in static DHCP, leases, neighbours)
 

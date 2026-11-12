@@ -111,9 +111,18 @@ function hasSchedule(dev) {
 
 var DAY_NAMES = { '1': 'Mon', '2': 'Tue', '3': 'Wed', '4': 'Thu', '5': 'Fri', '6': 'Sat', '7': 'Sun' };
 
+// A rule with no block and no speeds that only adds its quota: until the
+// quota is used up its traffic goes on to the rules after it (a broader
+// rule, else the global limit), as if it were not there (UCI quota_only).
+function quotaOnly(dev) {
+    return dev.quota_only === '1' && dev.block !== '1'
+        && !+(dev.download || 0) && !+(dev.upload || 0);
+}
+
 function describeRule(dev) {
     var dl = +(dev.download || 0), ul = +(dev.upload || 0);
     var what = (dev.block === '1') ? _('blocked')
+        : quotaOnly(dev) ? _('quota only, otherwise as the next rule')
         : (!dl && !ul) ? _('no limit')
         : _('Down %s / Up %s Mbit/s').format(dl || '\u221e', ul || '\u221e');
     var when = _('always');
@@ -168,7 +177,7 @@ function coverageMap(devs) {
             var reached = true, mine = true;
             chain.forEach(function(o) {
                 if (o === r) mine = reached;
-                if (o.always) reached = false;
+                if (o.always && !quotaOnly(o.dev)) reached = false;
             });
             if (mine) anyReached = true;
             if (chain.length < 2) return;
@@ -188,7 +197,7 @@ function coverageMap(devs) {
                 if (o === r) line += '  \u2190 ' + _('this row');
                 if (!reached) line += '  (' + _('never reached') + ')';
                 lines.push(line);
-                if (o.always) reached = false;
+                if (o.always && !quotaOnly(o.dev)) reached = false;
             });
         });
         if (anyShown)
@@ -1110,6 +1119,9 @@ return view.extend({
         o.datatype = 'ufloat';
         o.placeholder = '1';
         o.depends('quota_action', 'throttle');
+        o = s.option(form.Flag, 'quota_only', _('Quota Only'),
+            _('For a rule with no Block and no speeds: until the quota is used up, the device stays under the rule that would apply without this one (a broader rule, else the global limit) instead of being exempt from them.'));
+        o.modalonly = true;
 
         // Switch name (Edit dialog only): lets a limited login turn this
         // rule's block on/off and set its hours through
