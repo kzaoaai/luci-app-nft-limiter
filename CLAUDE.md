@@ -114,7 +114,7 @@ commit messages; use `192.0.2.x` placeholders.
 
 ## Current state
 
-- Unreleased (2026-11-26): **a used-up shared quota no longer comes back to life at a
+- v3.1.8 (2026-11-26): **a used-up shared quota no longer comes back to life at a
   rebuild.** The carry of a shared quota's use (`_snapshot_counters`, the `Q` lines) took the
   number after `used` and dropped its unit, so a quota of an even number of GB that was used
   up (`used 1953125 kbytes` for 2 GB) was seeded with 1/1024 of that at the next rebuild, and
