@@ -99,8 +99,60 @@ commit messages; use `192.0.2.x` placeholders.
   (`R` or per-address `A`) is counted from zero, since their counters and sets began at zero.
   And every command but `status`/`stats` holds `flock` on `/var/lock/nft-limiter.lock`, so a
   snapshot never reads the new keys file against the old chain.
+- **nft's text output gives a size with a unit, and a used-up quota reads as its own size.**
+  nft prints a size in the largest unit that divides it exactly (`over 9765625 kbytes` for
+  10 GB; 1.1.6 goes up to `mbytes`); counters are always plain bytes, and `-j` output is
+  always bytes. The kernel adds every packet to a quota's count but reports at most the quota
+  (`nft_quota_do_dump`), so a used-up quota prints `used` equal to its size, and a size that
+  is a multiple of 1024 bytes (every even number of GB) comes back as `kbytes`. So every
+  reader of a size in nft's text takes the unit word with the number (`_AWK_SIZE`, awk's
+  `b(number, unit)`). The kernel also refuses a quota created with `used` above `over`
+  (`Invalid argument`), which fails the whole transaction, so `_emit_device` caps both
+  seeds (the shared quota's and each per-device element's) at the quota. Either source can
+  exceed it: the history counts dropped and throttled traffic too, and a quota can be
+  lowered below what is already used.
 
 ## Current state
+
+- Unreleased (2026-11-26): **a used-up shared quota no longer comes back to life at a
+  rebuild.** The carry of a shared quota's use (`_snapshot_counters`, the `Q` lines) took the
+  number after `used` and dropped its unit, so a quota of an even number of GB that was used
+  up (`used 1953125 kbytes` for 2 GB) was seeded with 1/1024 of that at the next rebuild, and
+  the devices it had blocked or throttled were let go until they used the quota again. Any
+  other quota had the same fault whenever its count was an exact multiple of 1024 bytes. The
+  per-device reader (`_qe_elements`) already applied the unit; both now share `_AWK_SIZE`.
+  Tested: the three reader functions cut from the engine, run on sample nft output with a
+  stub `nft` (macOS awk, and busybox on an MT7621 and a Filogic router): v3.1.7 carries
+  1953125 for a used-up 2 GB quota, the fix 2000000000. The print rule was read in nftables
+  1.1.6, seen on three routers for `over`, and seen for `used` on an MT7621: a quota object
+  made in a scratch table with `used` at its size prints `over 1953125 kbytes used 1953125
+  kbytes`, from which the v3.1.7 reader takes 1953125 and the fix 2000000000. The report
+  limit was read in kernels 6.6 and 6.12. The patched engine then ran one real rebuild on
+  that MT7621: its three quotas' use was carried unchanged, the seeds written in bytes.
+  Not yet seen on a router: a quota used up by real traffic, across a rebuild.
+  Also: **a seed above the quota no longer fails the rebuild.** The seeds were not limited
+  to the quota, and the kernel refuses `used` above `over`. With a seed from the history
+  (boot, or a start after a stop) in a period in which the quota was used up, no rules
+  loaded until a rebuild after that period ended; with a quota lowered below what was used,
+  the old rules stayed in force and that apply and every later one failed until the quota's
+  reset. Both seeds are now min(used, quota). Tested: the engine's own `_emit_device` with
+  its helpers stubbed, eight rows (macOS awk, and busybox on the same two routers), the
+  statements then given to `nft -c` there (6.12): v3.1.7 writes five seeds above their quota
+  and the kernel refuses all five, shared and per-device; the fix writes none and all are
+  accepted, values under the quota unchanged. Not reproduced on a router: a boot or a
+  lowered quota with the real build. A quota lowered below its use and raised again in the
+  same period counts on from the lower figure: the rebuild knows no more than the kernel
+  reports, and that is at most the quota.
+- Open, found the same day, not fixed:
+  - `nft-limiter-switch` finds its rule by position and writes by position. A LuCI save that
+    deletes or moves an earlier rule between the two (some tens of ms) sends the write to the
+    neighbouring rule. Fix when that file is next touched: take the section's own name from
+    `uci -X show` and stop if `uci set` fails (uci rejects a name whose section changed).
+  - `_tc_apply` deletes the IFB root qdisc and adds the classes again at every rebuild, so
+    shaped downloads run unshaped meanwhile (about 0.1 s on a Filogic router, 0.5 s on an
+    MT7621 with 9 classes; estimated from the time of read-only tc calls, not measured), and
+    the packets queued in the old classes are dropped. Blocks are not affected. Fix: leave
+    the tree alone when the new tags file equals the old one, else change classes in place.
 
 - v3.1.7 (2026-11-12): **quota-only rules** (UCI `quota_only`, LuCI "Quota Only" in the Edit dialog).
   A rule with no block and no speeds normally exempts its targets from everything after it (its
