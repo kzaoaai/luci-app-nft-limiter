@@ -47,6 +47,10 @@ commit messages; use `192.0.2.x` placeholders.
   the engine against a router's live config: copy `nft-limiter` with `nft -f` → `nft -c -f`,
   `/var/run/nft-limiter.` → `/tmp/…`, the tc calls stubbed, and run `build_chain`
   (UCI_CONFIG_DIR + `uci -c` for a scratch config).
+- **A test on the maintainer's routers is not a stock test unless busybox's tools are
+  forced.** Those routers have gawk and GNU sed as `awk` and `sed`; a stock install has
+  busybox's. Put `awk() { busybox awk "$@"; }` and `sed() { busybox sed "$@"; }` at the top
+  of the script sent to the router, run it both ways, and say which tools a result came from.
 
 ## Invariants (the code does not say why)
 
@@ -111,9 +115,39 @@ commit messages; use `192.0.2.x` placeholders.
   seeds (the shared quota's and each per-device element's) at the quota. Either source can
   exceed it: the history counts dropped and throttled traffic too, and a quota can be
   lowered below what is already used.
+- **Busybox awk prints `%d` as a 32-bit number**: 6000000000 comes out as 2147483647
+  (BusyBox 1.37.0; gawk prints it whole). `print`, `%s` and string joins are whole. So awk
+  prints sizes, IPv4 addresses as numbers, and anything else that can pass 2^31 with `%.0f`.
+  The epochs in `history`'s first line are still `%d`, which holds until 2038.
+- **A class's fq_codel leaf has the handle tag + 0x100** (`101:` to `1ff:`), never the tag's
+  own number: a handle is one of a kind on the device, and tag 1 (rule 0) would ask for the
+  root HTB's `1:`. Nothing reads the leaf handles; the classes stay `1:<hex tag>`.
 
 ## Current state
 
+- v3.1.9 (2026-11-27): three faults older than v3.1.8, found while installing it.
+  **Sizes above 2 GB under busybox awk.** Five `%d` prints carried numbers that pass 2^31,
+  which busybox awk cuts to 2147483647: the history's totals and bars, the quota seeds taken
+  from the history (`_quota_used`, `_quota_used_addrs`), and the DHCP pool bounds of the
+  `unreserved` target, so a pool in a 192.168 network came out as 127.255.255.255 and the
+  target matched nothing of the LAN. A router with gawk as `awk` never showed it. Now `%.0f`.
+  **Rule 0 had no fq_codel in shape mode.** Its class `1:1` asked for a leaf with handle
+  `1:`, the root's, and tc refused it (`Cannot move an existing qdisc to a different
+  parent`, printed at every rebuild and seen only when one runs in a terminal), so the class
+  kept its rate but queued in HTB's plain default queue. Leaf handles are now tag + 0x100.
+  **`sed: couldn't flush stdout: Broken pipe` during a package upgrade** came from the MAC
+  lookup, where `sed` fed `head -n1`: with an address on more than one dhcp host section
+  and GNU sed, under apk (which appears to run scripts with SIGPIPE ignored). Harmless; the
+  reader is now an awk that reads to the end.
+  Tested: the engine's own functions with their callers stubbed (`_unres_lists`,
+  `_quota_used`, `_quota_used_addrs`, `history`, `_resolve_mac`), on macOS awk and on an
+  MT7621 and a Filogic router with gawk and again with busybox awk and sed forced. v3.1.8
+  fails under busybox awk (pool 127.255.255.255, every size 2147483647) and prints the sed
+  line under GNU sed; the fix passes all four ways. `_tc_apply` with a stub `tc`: v3.1.8
+  asks for `parent 1:1 handle 1:`, the fix for `handle 101:`. On a scratch IFB device on the
+  Filogic router (6.12) tc refuses the first with that error and takes the second, and a
+  real rebuild there gave rule 0's class its leaf (`fq_codel 101: parent 1:1`, five leaves
+  for five classes). Not yet done: a stock install without gawk.
 - v3.1.8 (2026-11-26): **a used-up shared quota no longer comes back to life at a
   rebuild.** The carry of a shared quota's use (`_snapshot_counters`, the `Q` lines) took the
   number after `used` and dropped its unit, so a quota of an even number of GB that was used
@@ -122,7 +156,8 @@ commit messages; use `192.0.2.x` placeholders.
   other quota had the same fault whenever its count was an exact multiple of 1024 bytes. The
   per-device reader (`_qe_elements`) already applied the unit; both now share `_AWK_SIZE`.
   Tested: the three reader functions cut from the engine, run on sample nft output with a
-  stub `nft` (macOS awk, and busybox on an MT7621 and a Filogic router): v3.1.7 carries
+  stub `nft` (macOS awk, and on an MT7621 and a Filogic router with gawk at the release and
+  with busybox awk and sed the day after): v3.1.7 carries
   1953125 for a used-up 2 GB quota, the fix 2000000000. The print rule was read in nftables
   1.1.6, seen on three routers for `over`, and seen for `used` on an MT7621: a quota object
   made in a scratch table with `used` at its size prints `over 1953125 kbytes used 1953125
@@ -136,7 +171,8 @@ commit messages; use `192.0.2.x` placeholders.
   loaded until a rebuild after that period ended; with a quota lowered below what was used,
   the old rules stayed in force and that apply and every later one failed until the quota's
   reset. Both seeds are now min(used, quota). Tested: the engine's own `_emit_device` with
-  its helpers stubbed, eight rows (macOS awk, and busybox on the same two routers), the
+  its helpers stubbed, eight rows (macOS awk, and gawk then busybox awk on the same two
+  routers), the
   statements then given to `nft -c` there (6.12): v3.1.7 writes five seeds above their quota
   and the kernel refuses all five, shared and per-device; the fix writes none and all are
   accepted, values under the quota unchanged. Not reproduced on a router: a boot or a

@@ -153,7 +153,9 @@ _burst() {
 _resolve_mac() {
     local ip="$1" mac="$2" sec
     if [ -z "$mac" ]; then
-        sec=$(uci -q show dhcp | sed -n "s/^dhcp\.\([^.]*\)\.ip='${ip}'$/\1/p" | head -n1)
+        # awk, not head: it reads to the end, so sed never writes to a closed
+        # pipe when the address is on more than one host section.
+        sec=$(uci -q show dhcp | sed -n "s/^dhcp\.\([^.]*\)\.ip='${ip}'$/\1/p" | awk 'NR == 1')
         [ -n "$sec" ] && mac=$(uci -q get "dhcp.${sec}.mac" | awk '{print $1}')
     fi
     [ -z "$mac" ] && [ -r /tmp/dhcp.leases ] && \
@@ -252,7 +254,7 @@ _unres_lists() {
             awk -v ip="$ai" -v bits="$2" -v st="${start:-100}" -v lim="${limit:-150}" 'BEGIN {
                 size = 2 ^ (32 - bits); net = ip - (ip % size); a = net + st; b = a + lim - 1
                 if (b > net + size - 2) b = net + size - 2; if (a <= net) a = net + 1
-                if (st ~ /^[0-9]+$/ && lim ~ /^[0-9]+$/ && a <= b) printf "%d %d\n", a, b }' | while read -r a b; do
+                if (st ~ /^[0-9]+$/ && lim ~ /^[0-9]+$/ && a <= b) printf "%.0f %.0f\n", a, b }' | while read -r a b; do
                 echo "P $(_int_to_ip4 "$a")-$(_int_to_ip4 "$b")"
             done
         done | sort -u
@@ -830,7 +832,11 @@ _tc_apply() {
     while read -r tag kbit _; do
         hex=$(printf '%x' "$tag")
         tc class add dev "$SHAPE_DEV" parent 1: classid "1:$hex" htb rate "${kbit}kbit" ceil "${kbit}kbit" quantum 1514
-        tc qdisc add dev "$SHAPE_DEV" parent "1:$hex" handle "$hex:" fq_codel
+        # The leaf's handle is the tag + 0x100 (101: to 1ff:). A handle is
+        # one of a kind on the device, and tag 1's own number would be the
+        # root's "1:", which tc refuses ("Cannot move an existing qdisc to
+        # a different parent"), leaving rule 0's class on HTB's plain queue.
+        tc qdisc add dev "$SHAPE_DEV" parent "1:$hex" handle "$(printf '%x' $(( tag + 256 ))):" fq_codel
         # Classify by tag, then clear the tag: the shaped packet goes back
         # out its LAN device, and LAN bridges whose port is a VLAN on
         # another LAN bridge (guest, IoT, ... on br-lan) would otherwise
@@ -1297,7 +1303,7 @@ _quota_used() {
     if [ "$2" = period ]; then from=$(_period_start); else from=$(( now - (now + off) % 86400 )); fi
     _hist_records "$from" | awk -v F="$from" -v rk="R|$1|" '
         $2 >= F { for (j = 3; j <= NF; j++) if (index($j, rk) == 1 && $j !~ /^[^=]*\|w=/) { n = index($j, "="); s += substr($j, n + 1) } }
-        END { printf "%d", s }'
+        END { printf "%.0f", s }'
 }
 
 # _quota_used_addrs <row key> <period> -- "<address> <bytes>" for each
@@ -1312,7 +1318,7 @@ _quota_used_addrs() {
         $2 >= F { for (j = 3; j <= NF; j++) if (index($j, ak) == 1) {
             n = index($j, "="); k = substr($j, length(ak) + 1, n - length(ak) - 1); sub(/\|[du]$/, "", k)
             s[k] += substr($j, n + 1) } }
-        END { for (a in s) printf "%s %d\n", a, s[a] }'
+        END { for (a in s) printf "%s %.0f\n", a, s[a] }'
 }
 
 # _qe_elements <set> -- "<address> <bytes used> <quota bytes>" for each
@@ -1421,11 +1427,11 @@ history() {
         END {
             nb = int((T - F + B - 1) / B)
             printf "{\"from\":%d,\"to\":%d,\"now\":%d,\"bucket\":%d,\"fine_from\":%d,\"hourly_from\":%d,\"first\":%d,\"totals\":{", F, T, now, B, fc, hc, first
-            sep = ""; for (k in tot) { printf "%s\"%s\":%d", sep, k, tot[k]; sep = "," }
+            sep = ""; for (k in tot) { printf "%s\"%s\":%.0f", sep, k, tot[k]; sep = "," }
             printf "},\"series\":{"; sep = ""
             for (k in sk) {
                 printf "%s\"%s\":[", sep, k; sep = ","
-                for (i = 0; i < nb; i++) printf "%s%d", (i ? "," : ""), ser[k, i]
+                for (i = 0; i < nb; i++) printf "%s%.0f", (i ? "," : ""), ser[k, i]
                 printf "]"
             }
             print "}}"
