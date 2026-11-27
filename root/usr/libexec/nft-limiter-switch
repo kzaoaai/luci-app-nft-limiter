@@ -12,45 +12,89 @@
 #
 # Every command prints one JSON object (the rule's state after the command,
 # or {"error": ...}), so an iOS Shortcut can read it with "Get Dictionary".
+# Both carry "text", the line the Shortcut shows.
 # A limited rpcd login is granted exec on this file and nothing else (ACL
 # group luci-app-nft-limiter-switch); everything it does is checked here.
+#
+# A rule is written by a section name of its own, never by its place. uci
+# names an unnamed section cfg, its place among the package's sections and
+# a hash of its type alone (cfg0a0f15), so that name is a place too: a rule
+# deleted or moved above it in LuCI between this command's read and its
+# write, or before its commit (which applies staged changes by name), hands
+# it to a neighbour, and the write lands there. The first write to a rule
+# therefore names it sw_<switch name>; no delete or move changes that.
 
 NAME=nft-limiter
+. /lib/functions.sh
 
 _json_str() {
     printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'
 }
 
 _fail() {
-    printf '{"error":"%s"}\n' "$(_json_str "$1")"
+    printf '{"error":"%s","text":"%s"}\n' "$(_json_str "$1")" "$(_json_str "Error: $1")"
     exit 1
 }
 
-# _find <name> -- echo the UCI section index of the rule with that switch_id
+# _find <switch name> -- read the config once and set $sec to the section
+#   name of the first rule with that switch name.
+_find_cb() {
+    local id
+    [ -z "$sec" ] || return 0
+    config_get id "$1" switch_id
+    [ "$id" = "$want" ] && sec="$1"
+}
+
 _find() {
-    local i=0 id
-    while uci -q get "${NAME}.@device[$i]" >/dev/null; do
-        id=$(uci -q get "${NAME}.@device[$i].switch_id")
-        [ -n "$id" ] && [ "$id" = "$1" ] && { echo "$i"; return 0; }
-        i=$((i + 1))
+    sec=""; want="$1"
+    config_load "$NAME"
+    config_foreach _find_cb device
+    [ -n "$sec" ]
+}
+
+# _own_name -- give the rule in $sec a section name of its own if it has
+#   none. The rename itself still goes by the place name, so it can land on
+#   a neighbour this once; the rule is then read again by its switch name
+#   and must carry the new name, else nothing is written (the neighbour
+#   keeps a name nothing reads, and its options are untouched).
+_own_name() {
+    local base new n=1
+    echo "$sec" | grep -qE '^cfg[0-9a-f]{6,}$' || return 0
+    base="sw_$(echo "$want" | sed 's/-/_/g')"; new="$base"
+    while uci -q get "${NAME}.${new}" >/dev/null; do
+        n=$((n + 1)); new="${base}_$n"
     done
-    return 1
+    uci -q rename "${NAME}.${sec}=${new}" && uci -q commit "$NAME" \
+        || _fail "could not name the rule; try again"
+    _find "$want" && [ "$sec" = "$new" ] \
+        || _fail "the rules were changed meanwhile; try again"
+}
+
+# _set <option>=<value>... -- stage each on the rule by its own name. A rule
+#   deleted meanwhile stops the command, and what was staged is dropped.
+_set() {
+    local kv
+    for kv; do
+        uci -q set "${NAME}.${sec}.${kv}" && continue
+        uci -q revert "${NAME}.${sec}"
+        _fail "unknown switch"
+    done
 }
 
 _mins() {
     echo "$1" | awk -F: '{ print $1 * 60 + $2 }'
 }
 
-# _state <idx> -- print the rule's state as JSON
+# _state <section> -- print the rule's state as JSON, from the last read
 _state() {
-    local i="$1" label en block ts te week from to allday now day inwin active text
-    label=$(uci -q get "${NAME}.@device[$i].comment")
-    [ -n "$label" ] || label=$(uci -q get "${NAME}.@device[$i].switch_id")
-    en=$(uci -q get "${NAME}.@device[$i].enable"); [ "$en" = 0 ] || en=1
-    block=$(uci -q get "${NAME}.@device[$i].block"); [ "$block" = 1 ] || block=0
-    ts=$(uci -q get "${NAME}.@device[$i].timestart"); ts=${ts:-00:00}
-    te=$(uci -q get "${NAME}.@device[$i].timeend"); te=${te:-00:00}
-    week=$(uci -q get "${NAME}.@device[$i].week"); week=${week:-0}
+    local s="$1" id label en block ts te week from to allday now day inwin active text
+    config_get id "$s" switch_id
+    config_get label "$s" comment; [ -n "$label" ] || label="$id"
+    config_get en "$s" enable; [ "$en" = 0 ] || en=1
+    config_get block "$s" block; [ "$block" = 1 ] || block=0
+    config_get ts "$s" timestart; ts=${ts:-00:00}
+    config_get te "$s" timeend; te=${te:-00:00}
+    config_get week "$s" week; week=${week:-0}
     allday=false; [ "$ts" = 00:00 ] && [ "$te" = 00:00 ] && allday=true
 
     # In force right now (router clock): enabled, blocking, inside the
@@ -77,9 +121,16 @@ _state() {
         text="$label is not blocked."
     fi
     printf '{"name":"%s","label":"%s","blocked":%s,"active_now":%s,"from":"%s","to":"%s","allday":%s,"text":"%s"}\n' \
-        "$(_json_str "$(uci -q get "${NAME}.@device[$i].switch_id")")" "$(_json_str "$label")" \
+        "$(_json_str "$id")" "$(_json_str "$label")" \
         "$([ "$en" = 1 ] && [ "$block" = 1 ] && echo true || echo false)" "$active" \
         "$ts" "$te" "$allday" "$(_json_str "$text")"
+}
+
+_list_cb() {
+    local id
+    config_get id "$1" switch_id
+    [ -n "$id" ] || return 0
+    printf '%s' "$sep"; _state "$1" | tr -d '\n'; sep=","
 }
 
 _apply() {
@@ -94,11 +145,8 @@ _valid_time() {
 cmd="$1"; name="$2"
 case "$cmd" in
     list)
-        i=0; sep=""; printf '['
-        while uci -q get "${NAME}.@device[$i]" >/dev/null; do
-            [ -n "$(uci -q get "${NAME}.@device[$i].switch_id")" ] && { printf '%s' "$sep"; _state "$i" | tr -d '\n'; sep=","; }
-            i=$((i + 1))
-        done
+        sep=""; config_load "$NAME"; printf '['
+        config_foreach _list_cb device
         printf ']\n'
         exit 0 ;;
     status|on|off|hours) ;;
@@ -106,16 +154,18 @@ case "$cmd" in
 esac
 
 echo "$name" | grep -qE '^[A-Za-z0-9_-]{1,32}$' || _fail "unknown switch"
-idx=$(_find "$name") || _fail "unknown switch"
+_find "$name" || _fail "unknown switch"
 
 case "$cmd" in
+    status)
+        _state "$sec"
+        exit 0 ;;
     on)
-        uci set "${NAME}.@device[$idx].enable=1"
-        uci set "${NAME}.@device[$idx].block=1"
-        _apply ;;
+        _own_name
+        _set enable=1 block=1 ;;
     off)
-        uci set "${NAME}.@device[$idx].block=0"
-        _apply ;;
+        _own_name
+        _set block=0 ;;
     hours)
         if [ "$3" = allday ]; then
             from=00:00; to=00:00
@@ -124,8 +174,9 @@ case "$cmd" in
             _valid_time "$from" && _valid_time "$to" || _fail "times must be HH:MM"
             [ "$from" = "$to" ] && _fail "start and end are the same; use allday"
         fi
-        uci set "${NAME}.@device[$idx].timestart=$from"
-        uci set "${NAME}.@device[$idx].timeend=$to"
-        _apply ;;
+        _own_name
+        _set "timestart=$from" "timeend=$to" ;;
 esac
-_state "$idx"
+_apply
+_find "$name" || _fail "unknown switch"
+_state "$sec"

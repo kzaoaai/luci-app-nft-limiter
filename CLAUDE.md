@@ -122,9 +122,45 @@ commit messages; use `192.0.2.x` placeholders.
 - **A class's fq_codel leaf has the handle tag + 0x100** (`101:` to `1ff:`), never the tag's
   own number: a handle is one of a kind on the device, and tag 1 (rule 0) would ask for the
   root HTB's `1:`. Nothing reads the leaf handles; the classes stay `1:<hex tag>`.
+- **An unnamed uci section's name is a position.** uci names it `cfg`, its place among all
+  the package's sections (two hex digits, from 01) and a hash of its type alone, so every
+  rule is `cfgNN0f15`: the parser names it at its `config` line, before any option is read
+  (`uci_add_section`). The comment in libuci's `uci_fixup_section` that promises a hash of
+  the options, and rejected updates after a reorder, is stale. A `uci set` is staged in
+  `/tmp/.uci` under that name and replayed by name onto the file as it is at `uci commit`;
+  rpcd keeps LuCI's changes per session and never reads `/tmp/.uci`. So a delete or move
+  above a rule in LuCI (the grid is sortable) hands its cfg name to a neighbour, and a write
+  by that name, or by `@device[N]`, lands there with no error. Anything that writes a rule
+  from outside LuCI addresses it by a real section name. Both `@device[N]` and LuCI's grid
+  (`cfgsections`) match on type alone, so a named rule counts and lists like the others.
+  Read in uci 2025.12.02 and rpcd 2026.10.04; the names seen on three routers.
 
 ## Current state
 
+- v3.1.10 (2026-11-28): **a family switch can no longer change the wrong rule.** `nft-limiter-switch` found its rule by position and wrote by position, so a rule
+  deleted or moved above it in LuCI between the read and the write, or before the commit,
+  sent `on`/`off`/`hours` to a neighbour (see the invariant on uci names). It now reads the
+  config once (`config_load`), finds the rule by its switch name, and on the first write
+  gives it a section name of its own with `uci rename` (`sw_<switch name>`, `-` as `_`,
+  `_2` and up when taken). The rename still goes by the cfg name, so the rule is read again
+  and must carry the new name, else the command stops with "try again"; a neighbour that
+  got the name keeps it and nothing else. Every write is then by that name; if the rule is
+  deleted between two writes, what was staged is reverted. `status` and `list` write nothing.
+  Errors now carry `text` too (`Error: ...`), the key the Shortcut shows, which was empty
+  for an error before. Commands, output and ACL otherwise unchanged.
+  Tested: `list`, `status` and the error paths, read-only on an MT7621 with its real uci:
+  output identical to v3.1.9's, nothing staged. On a Filogic router, both switch scripts
+  run unchanged but for `NAME`, the reapply call and a `uci` wrapper (`-c`/`-t` into a
+  `mktemp` directory), with its real uci and `/lib/functions.sh`, on a throwaway package of
+  five rules; a second save directory standing in for LuCI deleted the first rule right
+  before a chosen uci call of the switch. The fix changed the right rule with the delete
+  before its write or its commit, stopped with "try again" and changed no option with it
+  before the rename or the rename's commit (the neighbour got the name; the retry named the
+  rule `sw_kid_1_2`), and with the rule itself deleted between its two writes stopped and
+  left nothing staged. v3.1.9, and a write by the cfg name read before the delete, changed
+  the neighbour every time. Not yet: a first write on a live rule. Accepted, inferred and
+  not tried: a LuCI page opened before a rule's rename cannot save that rule until it is
+  reloaded.
 - v3.1.9 (2026-11-27): three faults older than v3.1.8, found while installing it.
   **Sizes above 2 GB under busybox awk.** Five `%d` prints carried numbers that pass 2^31,
   which busybox awk cuts to 2147483647: the history's totals and bars, the quota seeds taken
@@ -180,10 +216,6 @@ commit messages; use `192.0.2.x` placeholders.
   same period counts on from the lower figure: the rebuild knows no more than the kernel
   reports, and that is at most the quota.
 - Open, found the same day, not fixed:
-  - `nft-limiter-switch` finds its rule by position and writes by position. A LuCI save that
-    deletes or moves an earlier rule between the two (some tens of ms) sends the write to the
-    neighbouring rule. Fix when that file is next touched: take the section's own name from
-    `uci -X show` and stop if `uci set` fails (uci rejects a name whose section changed).
   - `_tc_apply` deletes the IFB root qdisc and adds the classes again at every rebuild, so
     shaped downloads run unshaped meanwhile (about 0.1 s on a Filogic router, 0.5 s on an
     MT7621 with 9 classes; estimated from the time of read-only tc calls, not measured), and

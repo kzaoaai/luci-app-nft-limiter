@@ -134,5 +134,7 @@ uci commit rpcd && /etc/init.d/rpcd restart
 
 `contrib/make-shortcut.py` builds an iOS/macOS Shortcut that does this (status, then block on/off or change hours); see its header for usage and signing.
 
-Commands: `status <name>`, `on <name>`, `off <name>`, `hours <name> <HH:MM> <HH:MM>`, `hours <name> allday`, and `list`. Each prints the rule's state as JSON (`blocked`, `active_now`, `from`, `to`, `allday`, `text`).
+Commands: `status <name>`, `on <name>`, `off <name>`, `hours <name> <HH:MM> <HH:MM>`, `hours <name> allday`, and `list`. Each prints the rule's state as JSON (`blocked`, `active_now`, `from`, `to`, `allday`, `text`), or `error` and `text` when it changed nothing.
+
+The first change made through a switch gives its rule a section name of its own (`nft-limiter.sw_<name>` in `uci show`), so the switch keeps reaching that rule when rules above it are deleted or moved.
 
