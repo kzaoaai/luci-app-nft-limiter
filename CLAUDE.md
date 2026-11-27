@@ -158,9 +158,12 @@ commit messages; use `192.0.2.x` placeholders.
   before the rename or the rename's commit (the neighbour got the name; the retry named the
   rule `sw_kid_1_2`), and with the rule itself deleted between its two writes stopped and
   left nothing staged. v3.1.9, and a write by the cfg name read before the delete, changed
-  the neighbour every time. Not yet: a first write on a live rule. Accepted, inferred and
-  not tried: a LuCI page opened before a rule's rename cannot save that rule until it is
-  reloaded.
+  the neighbour every time. Live, on an MT7621 after the upgrade: `hours` with the rule's
+  own hours renamed it `sw_<name>` in place (still `@device[7]`, its nft rules still
+  `dev_7`, the neighbours' cfg names unchanged), the rebuild kept every rule, nothing was
+  left staged, and rpcd's `uci get` (what LuCI loads) lists it in order with `.anonymous`
+  false. Accepted, inferred and not tried: a LuCI page opened before a rule's rename cannot
+  save that rule until it is reloaded.
 - v3.1.9 (2026-11-27): three faults older than v3.1.8, found while installing it.
   **Sizes above 2 GB under busybox awk.** Five `%d` prints carried numbers that pass 2^31,
   which busybox awk cuts to 2147483647: the history's totals and bars, the quota seeds taken
