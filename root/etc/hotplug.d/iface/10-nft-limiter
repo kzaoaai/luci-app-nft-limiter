@@ -2,9 +2,13 @@
 [ "$ACTION" = "ifup" ] || exit 0
 ifaces=$(uci -q get nft-limiter.@nft-limiter[0].iface)
 [ -z "$ifaces" ] && ifaces="wan"
+# netifd runs these scripts one at a time, so the waits run in the
+# background: in the foreground they held 20-firewall and every later
+# script back on each ifup.
 case " $ifaces " in
-    *" $INTERFACE "*) sleep 5; /etc/init.d/nft-limiter reapply ;;
+    *" $INTERFACE "*) ( sleep 5; /etc/init.d/nft-limiter reapply ) >/dev/null 2>&1 & ;;
     *)  # A LAN-side interface came (back) up: shape mode re-attaches its
         # redirect filters, which an interface restart removes.
-        [ -s /var/run/nft-limiter.tags ] && { sleep 2; /usr/bin/nft-limiter tcsync; } ;;
+        [ -s /var/run/nft-limiter.tags ] && \
+            ( sleep 2; /usr/bin/nft-limiter tcsync ) >/dev/null 2>&1 & ;;
 esac

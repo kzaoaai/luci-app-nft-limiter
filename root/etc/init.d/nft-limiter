@@ -16,9 +16,12 @@ NAME=nft-limiter
 # and the LuCI Enable/Disable buttons all flip the same thing. Until v3.1.5 a
 # UCI flag also had to be 1, so enabling the service from any of those left
 # it "on" with no rules loaded.
-# Custom verbs driven by the LuCI Status tab service controls. They drive the
-# one-shot engine directly rather than procd start/stop, which would emit
-# harmless "ubus service delete" noise since this service runs no daemon.
+# Custom verbs driven by the LuCI Status tab service controls. off and
+# reapply drive the one-shot engine directly rather than procd stop, which
+# would emit harmless "ubus service delete" noise since this service runs no
+# daemon. on goes through procd's start: that is what registers
+# service_triggers (the config reload and the dhcp trigger), and a router
+# booted with the limiter off has none registered until something does.
 #   on     : enable on boot and load the rules now
 #   off    : disable on boot and remove the rules
 #   reapply: rebuild the rules now; no-op when disabled
@@ -32,7 +35,7 @@ EXTRA_HELP="        on      Enable the limiter (enable on boot, load rules)
 
 on() {
     enable
-    nft-limiter start
+    start
 }
 
 # Disable first, so a hotplug reapply racing this cannot load the rules again.

@@ -232,6 +232,9 @@ msgstr ""
 msgid "always"
 msgstr ""
 
+msgid "all day"
+msgstr ""
+
 msgid "this row"
 msgstr ""
 
@@ -398,6 +401,9 @@ msgid "Throttle"
 msgstr ""
 
 msgid "Throttle To (Mbit/s)"
+msgstr ""
+
+msgid "Must be above 0; to stop the traffic, choose Block"
 msgstr ""
 
 msgid "Quota Only"

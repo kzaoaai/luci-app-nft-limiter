@@ -104,8 +104,9 @@ fi
 #    kmod-ifb and a tc binary (tc-tiny unless some tc is already installed;
 #    naming one avoids the package manager having to pick a "tc" provider).
 #    The package depends on these too; installing them first is what makes
-#    the dependency resolvable. If they cannot be installed (no matching
-#    kernel modules in the feed), the limiter still runs and polices.
+#    the dependency resolvable. If one cannot be installed (no matching
+#    kernel modules in the feed), the package install below fails too. (The
+#    police fallback is for a router whose modules go missing later.)
 echo "Updating package lists..."
 if [ "$PKG_MGR" = "apk" ]; then apk update >/dev/null 2>&1; else opkg update >/dev/null 2>&1; fi
 NEED="kmod-sched-core kmod-ifb"
@@ -114,11 +115,11 @@ for p in $NEED; do
     if [ "$PKG_MGR" = "apk" ]; then
         apk info -e "$p" >/dev/null 2>&1 && continue
         echo "Installing dependency $p ..."
-        apk add "$p" >/dev/null 2>&1 || echo "Warning: could not install $p; downloads will be policed, not shaped."
+        apk add "$p" >/dev/null 2>&1 || echo "Warning: could not install $p, which the package needs; the install below will likely fail."
     else
         opkg list-installed | grep -q "^$p " && continue
         echo "Installing dependency $p ..."
-        opkg install "$p" >/dev/null 2>&1 || echo "Warning: could not install $p; downloads will be policed, not shaped."
+        opkg install "$p" >/dev/null 2>&1 || echo "Warning: could not install $p, which the package needs; the install below will likely fail."
     fi
 done
 

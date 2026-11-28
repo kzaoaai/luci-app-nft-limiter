@@ -104,9 +104,10 @@ function ip4Span(t) {
     return null;
 }
 
+// Equal hours are all day (the engine writes no hours for them).
 function hasSchedule(dev) {
     var ts = dev.timestart || '00:00', te = dev.timeend || '00:00';
-    return (ts !== '00:00' || te !== '00:00') || (dev.week && dev.week !== '0');
+    return (ts !== te) || (dev.week && dev.week !== '0');
 }
 
 var DAY_NAMES = { '1': 'Mon', '2': 'Tue', '3': 'Wed', '4': 'Thu', '5': 'Fri', '6': 'Sat', '7': 'Sun' };
@@ -127,7 +128,8 @@ function describeRule(dev) {
         : _('Down %s / Up %s Mbit/s').format(dl || '\u221e', ul || '\u221e');
     var when = _('always');
     if (hasSchedule(dev)) {
-        when = (dev.timestart || '00:00') + '\u2013' + (dev.timeend || '00:00');
+        var ts = dev.timestart || '00:00', te = dev.timeend || '00:00';
+        when = (ts !== te) ? ts + '\u2013' + te : _('all day');
         if (dev.week && dev.week !== '0')
             when += ' ' + dev.week.split(',').map(function(d) { return DAY_NAMES[d] || d; }).join(',');
     }
@@ -669,7 +671,8 @@ function quotaTable(quotas) {
         var used = q.used || 0, limit = q.bytes || 0, pct = limit ? Math.min(100, used / limit * 100) : 0;
         // A per-device quota row (q.addr): one per device, from history's third line.
         var label = (dev.comment || toList(dev.target).map(targetLabel).join(', ')) + (q.addr ? ' \u00b7 ' + q.addr : '');
-        var action = dev.quota_action === 'throttle'
+        // A throttle to 0 is a block (the engine writes it as one).
+        var action = (dev.quota_action === 'throttle' && +(dev.quota_rate || 1) > 0)
             ? _('then %s Mbit/s').format(dev.quota_rate || '1') : _('then blocked');
         return E('tr', { 'class': 'tr' }, [
             E('td', { 'class': 'td' }, label),
@@ -1137,6 +1140,11 @@ return view.extend({
         o.modalonly = true;
         o.datatype = 'ufloat';
         o.placeholder = '1';
+        o.validate = function(section_id, value) {
+            if (value !== '' && value != null && !(+value > 0))
+                return _('Must be above 0; to stop the traffic, choose Block');
+            return true;
+        };
         o.depends('quota_action', 'throttle');
         o = s.option(form.Flag, 'quota_each', _('Quota Per Device'),
             _('For a rule covering several devices (a list, subnet, range or Unreserved devices): each device gets the whole quota and is throttled or blocked on its own once it is used up. Off: they share one quota. Counts IPv4 traffic.'));

@@ -619,25 +619,48 @@ _catch_all_lines() {
 # _time_and_day_expr <timestart> <timeend> <week>
 #   Sets shell variables _time_expr and _day_expr for use in rules.
 # -----------------------------------------------------------------------
+#   Both go into the rules as text, so only HH:MM hours and day numbers 1-7
+#   get there: anything else (a hand edit; LuCI and nft-limiter-switch check
+#   their input) is logged and read as no hours, or as no such day. Equal
+#   hours are all day, as 00:00-00:00 always was, and an empty hour is 00:00,
+#   as LuCI (its placeholder) and nft-limiter-switch show it: until v3.1.11
+#   a start with no end was all day here while both showed a window.
+#   $(printf) drops trailing newlines, as $(uci get) does, so the callers
+#   that read by config_get and by uci get see the same value.
 _time_and_day_expr() {
-    local ts="$1" te="$2" week="$3"
+    local ts te week="$3"
+    ts=$(printf '%s' "${1:-00:00}"); te=$(printf '%s' "${2:-00:00}")
     _time_expr=""
     _day_expr=""
 
-    if [ -n "$ts" ] && [ -n "$te" ]; then
-        if [ "$ts" != "00:00" ] || [ "$te" != "00:00" ]; then
+    if [ "$ts" != "$te" ]; then
+        if _is_hhmm "$ts" && _is_hhmm "$te"; then
             _time_expr="meta hour \"${ts}\"-\"${te}\""
+        else
+            logger -t nft-limiter "ignoring invalid hours (not HH:MM); the rule applies all day"
         fi
     fi
 
     if [ -n "$week" ] && [ "$week" != "0" ]; then
         local nft_days="" d nd
+        set -f    # a hand-edited * or ? must not expand to file names
         for d in $(echo "$week" | tr ',' ' '); do
-            [ "$d" -eq 7 ] && nd=0 || nd="$d"
+            case "$d" in [1-7]) ;; *) logger -t nft-limiter "ignoring invalid day in week"; continue ;; esac
+            [ "$d" = 7 ] && nd=0 || nd="$d"
             nft_days="${nft_days:+${nft_days}, }${nd}"
         done
-        _day_expr="meta day { ${nft_days} }"
+        set +f
+        [ -n "$nft_days" ] && _day_expr="meta day { ${nft_days} }"
     fi
+}
+
+# _is_hhmm <value> -- true for 00:00 to 23:59 and nothing else. A case
+#   pattern matches the whole value, newlines included.
+_is_hhmm() {
+    case "$1" in
+        [01][0-9]:[0-5][0-9]|2[0-3]:[0-5][0-9]) return 0 ;;
+    esac
+    return 1
 }
 
 # -----------------------------------------------------------------------
@@ -738,9 +761,11 @@ _emit_device() {
         els=$(echo "$els" | awk -v q="$qb" 'NF == 2 && $2 > 0 && !seen[$1]++ { printf "%s%s quota over %s bytes used %.0f bytes", s, $1, q, ($2 + 0 > q + 0) ? q : $2; s = ", " }')
         [ -n "$els" ] && els=" elements = { $els };"
         printf '    set %s { type ipv4_addr; flags dynamic; size 4096;%s }\n' "$_qe_name" "$els" >> "$_obj_file"
-        if [ "$qact" = throttle ]; then
+        # A throttle to 0 (or to no number) is a block: nft refuses a limit
+        # of 0 and tc a class of 0kbit, either failing or unshaping the row.
+        _q_rate_kb=$(_mbit_to_kb "${qrate:-1}")
+        if [ "$qact" = throttle ] && [ "$_q_rate_kb" -gt 0 ] 2>/dev/null; then
             _q_throttle=1
-            _q_rate_kb=$(_mbit_to_kb "${qrate:-1}")
             for t in dl ul; do
                 printf '    set %sqel_%s_%s { type ipv4_addr; flags dynamic; size 4096; }\n' "$OBJ_PREFIX" "$idx" "$t" >> "$_obj_file"
             done
@@ -751,13 +776,12 @@ _emit_device() {
         [ -n "$qused" ] || qused=$(_quota_used "$_rowkey" "$qper")
         qused=$(awk -v u="${qused:-0}" -v q="$qb" 'BEGIN { printf "%.0f", (u + 0 > q + 0) ? q : u }')
         printf '    quota %s { over %s bytes used %s bytes }\n' "$_q_name" "$qb" "$qused" >> "$_obj_file"
-        if [ "$qact" = throttle ]; then
+        _q_rate_kb=$(_mbit_to_kb "${qrate:-1}")
+        if [ "$qact" = throttle ] && [ "$_q_rate_kb" -gt 0 ] 2>/dev/null; then
             _q_throttle=1
-            qrate=$(_mbit_to_kb "${qrate:-1}")
-            _q_rate_kb=$qrate
             for t in dl ul; do
                 printf '    limit %sqlim_%s_%s { rate over %s kbytes/second burst %s kbytes }\n' \
-                    "$OBJ_PREFIX" "$idx" "$t" "$qrate" "$(_burst "$qrate")" >> "$_obj_file"
+                    "$OBJ_PREFIX" "$idx" "$t" "$_q_rate_kb" "$(_burst "$_q_rate_kb")" >> "$_obj_file"
             done
         fi
     fi
@@ -831,7 +855,8 @@ _tc_apply() {
     tc qdisc add dev "$SHAPE_DEV" root handle 1: htb default 0 || return 1
     while read -r tag kbit _; do
         hex=$(printf '%x' "$tag")
-        tc class add dev "$SHAPE_DEV" parent 1: classid "1:$hex" htb rate "${kbit}kbit" ceil "${kbit}kbit" quantum 1514
+        tc class add dev "$SHAPE_DEV" parent 1: classid "1:$hex" htb rate "${kbit}kbit" ceil "${kbit}kbit" quantum 1514 \
+            || logger -t nft-limiter "tc refused class 1:$hex (${kbit}kbit); its row runs unshaped"
         # The leaf's handle is the tag + 0x100 (101: to 1ff:). A handle is
         # one of a kind on the device, and tag 1's own number would be the
         # root's "1:", which tc refuses ("Cannot move an existing qdisc to
@@ -933,11 +958,15 @@ build_chain() {
     rm -f "$rules_file" "$_obj_file" "$_learn_file" "$_carry_file"
 
     # Apply it ourselves in one transaction: ensure the chain exists, flush
-    # it, drop our old limit objects (rates may have changed; nothing
-    # references them once flushed), then load the body. The old rules stay
-    # in force until the whole transaction commits, so there is no gap. IPv6
-    # sets are kept so learned addresses survive; redeclaring an identical
-    # set is a no-op.
+    # it, drop our old limit and quota objects and sets (nothing references
+    # them once flushed), then load the body. The old rules stay in force
+    # until the whole transaction commits, so there is no gap. IPv6 sets are
+    # kept so learned addresses survive. Every other set is deleted because
+    # declaring a set that exists only adds elements: before v3.1.11 a
+    # removed reservation stayed in nftlim_res (its device exempt from the
+    # unreserved rule), and a per-device quota or throttle kept its old size
+    # or rate for the devices already in nftlim_qe_*/nftlim_qel_*. Their
+    # state is carried (E lines) or rebuilt from the config.
     {
         printf 'table inet %s {\n' "$NFT_TABLE"
         printf '    chain %s {\n' "$NFT_CHAIN"
@@ -950,14 +979,22 @@ build_chain() {
         for name in $(_list_objects quota); do
             printf 'delete quota inet %s %s\n' "$NFT_TABLE" "$name"
         done
-        # Accounting sets are recreated with their carried elements.
+        # Sets are recreated with their carried elements, the IPv6 ones kept.
         for name in $(_list_objects set); do
-            case "$name" in "${OBJ_PREFIX}acct_"*)
-                printf 'delete set inet %s %s\n' "$NFT_TABLE" "$name" ;;
-            esac
+            case "$name" in "${OBJ_PREFIX}v6_"*) continue ;; esac
+            printf 'delete set inet %s %s\n' "$NFT_TABLE" "$name"
         done
         printf 'table inet %s {\n    include "%s"\n}\n' "$NFT_TABLE" "${FW4_BODY}.new"
     } > "$NFT_FILE"
+    # Check the transaction before anything changes. The shaper is rebuilt
+    # first (below), so a transaction the kernel then refused left the old
+    # rules tagging for classes that were gone: those rows ran unshaped
+    # until the next good rebuild.
+    if ! nft -c -f "$NFT_FILE"; then
+        logger -t nft-limiter "rebuild refused by nft; the rules in force are unchanged"
+        rm -f "$_tags_new"
+        return 1
+    fi
     # Shaping classes go up before the rules that tag packets for them. If
     # shaping is unavailable, rebuild once more in police mode.
     if [ "$_shape" = 1 ]; then

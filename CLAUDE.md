@@ -103,6 +103,12 @@ commit messages; use `192.0.2.x` placeholders.
   (`R` or per-address `A`) is counted from zero, since their counters and sets began at zero.
   And every command but `status`/`stats` holds `flock` on `/var/lock/nft-limiter.lock`, so a
   snapshot never reads the new keys file against the old chain.
+- **Every rebuild deletes every `nftlim_` set but the `nftlim_v6_*` ones**, in the same
+  transaction, and declares them again: declaring a set that exists only adds elements, so
+  before v3.1.11 a removed reservation stayed in `nftlim_res` and a per-device quota or
+  throttle kept its old size or rate for the devices already in `nftlim_qe_*`/`qel_*`. Their
+  state comes back from the carry (`E` lines) or the config. The transaction is checked with
+  `nft -c` before `_tc_apply` touches the shaper.
 - **nft's text output gives a size with a unit, and a used-up quota reads as its own size.**
   nft prints a size in the largest unit that divides it exactly (`over 9765625 kbytes` for
   10 GB; 1.1.6 goes up to `mbytes`); counters are always plain bytes, and `-j` output is
@@ -137,6 +143,30 @@ commit messages; use `192.0.2.x` placeholders.
 
 ## Current state
 
+- v3.1.11 (unreleased, committed 2026-11-28): fixes from an outside review, each checked
+  against the code. **The family-switch login could write nft statements**: `hours` checked
+  its values with `echo | grep -qE '^HH:MM$'`, which passes a value with a newline when any
+  line matches, and the engine pasted the value into `meta hour "..."`. The switch and the
+  engine now check hours (and the engine the week's days) with whole-value `case` patterns;
+  anything else is logged and read as all day, and `status`/`list` read stored values the same
+  way. **Old set elements outlived rebuilds** (see the invariant on sets). **A refused rebuild
+  left rows unshaped**: the shaper was rebuilt before `nft -f`, so the old rules tagged for
+  classes that were gone; `nft -c` now runs first and tc class failures are logged. **A
+  throttle of 0** made a limit nft refuses and a 0kbit class; it is now a block, and LuCI asks
+  for more than 0. **Equal hours are all day** everywhere (were a window like
+  `"12:00"-"12:00"`), and **an empty hour is 00:00** in the engine as LuCI and the switch show
+  it (a start with no end was all day). **`on` goes through procd's `start`**, so a router
+  booted with the limiter off gets its triggers (dhcp, config reload) when it is turned on.
+  **The iface hotplug waits run in the background**: netifd runs those scripts one at a time,
+  so the 5 s sleep held `20-firewall` back on every WAN ifup. **install.sh** no longer says a
+  failed kmod install leaves policing: the package depends on them, so its install fails.
+  Tested: syntax (`dash -n`, `node --check`); the hours, days and name checks under dash
+  (newline values, 24:00, equal and empty hours, `*` in week); a four-lens review of the diff.
+  Not yet run on a router or under busybox. To check there: an `nft -c` of `rate over 0` and
+  of `meta hour "12:00"-"12:00"`, `uci set` of a value with a newline in a scratch `-c` dir,
+  a rebuild after removing a reservation (the address leaves `nftlim_res`), and `on` after a
+  boot with the limiter off (`ubus call service list '{"name":"nft-limiter","verbose":true}'`
+  shows the triggers).
 - v3.1.10 (2026-11-28): **a family switch can no longer change the wrong rule.** `nft-limiter-switch` found its rule by position and wrote by position, so a rule
   deleted or moved above it in LuCI between the read and the write, or before the commit,
   sent `on`/`off`/`hours` to a neighbour (see the invariant on uci names). It now reads the
