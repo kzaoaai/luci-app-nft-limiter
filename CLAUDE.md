@@ -143,7 +143,7 @@ commit messages; use `192.0.2.x` placeholders.
 
 ## Current state
 
-- v3.1.11 (unreleased, committed 2026-11-28): fixes from an outside review, each checked
+- v3.1.11 (2026-11-28): fixes from an outside review, each checked
   against the code. **The family-switch login could write nft statements**: `hours` checked
   its values with `echo | grep -qE '^HH:MM$'`, which passes a value with a newline when any
   line matches, and the engine pasted the value into `meta hour "..."`. The switch and the
@@ -175,10 +175,15 @@ commit messages; use `192.0.2.x` placeholders.
   `build_chain` were dry-run against that router's live config (`nft -f` as `nft -c`,
   `/var/run` under `/tmp`, tc and ip stubbed, nft writes blocked, busybox awk and sed). nft
   accepted both. The bodies (counters, quota use and set elements normalized) and the tags were
-  identical, and the new transaction also deletes `nftlim_res`/`nftlim_unres`. Not yet run: a
-  real rebuild; `on` after a boot with the limiter off (`ubus call service list
-  '{"name":"nft-limiter","verbose":true}'` shows the triggers); a reservation removed live;
-  LuCI's `quota_rate` check in a browser.
+  identical, and the new transaction also deletes `nftlim_res`/`nftlim_unres`. Live on that
+  router after the upgrade (install.sh, 3.1.10 → 3.1.11): rule, set and class counts
+  unchanged by the upgrade and by a `reapply` (10 s, of which the `nft -c` is about 0.3 s),
+  nothing logged. With procd's registration removed (`ubus call service delete`, the rules
+  left in place), `on` registered both triggers again. A temporary static host at a free
+  pool address entered `nftlim_res` 17 s after `uci commit dhcp; reload_config` (folded with
+  a neighbour into a /31, so a check must use `nft get element`, not the listing) and left it
+  10 s after the host was deleted; v3.1.10 would have kept it. Not yet run: LuCI's
+  `quota_rate` check in a browser, and a stock install with busybox's own tools throughout.
 - v3.1.10 (2026-11-28): **a family switch can no longer change the wrong rule.** `nft-limiter-switch` found its rule by position and wrote by position, so a rule
   deleted or moved above it in LuCI between the read and the write, or before the commit,
   sent `on`/`off`/`hours` to a neighbour (see the invariant on uci names). It now reads the
