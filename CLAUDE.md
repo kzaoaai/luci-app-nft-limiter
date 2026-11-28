@@ -160,13 +160,25 @@ commit messages; use `192.0.2.x` placeholders.
   **The iface hotplug waits run in the background**: netifd runs those scripts one at a time,
   so the 5 s sleep held `20-firewall` back on every WAN ifup. **install.sh** no longer says a
   failed kmod install leaves policing: the package depends on them, so its install fails.
-  Tested: syntax (`dash -n`, `node --check`); the hours, days and name checks under dash
-  (newline values, 24:00, equal and empty hours, `*` in week); a four-lens review of the diff.
-  Not yet run on a router or under busybox. To check there: an `nft -c` of `rate over 0` and
-  of `meta hour "12:00"-"12:00"`, `uci set` of a value with a newline in a scratch `-c` dir,
-  a rebuild after removing a reservation (the address leaves `nftlim_res`), and `on` after a
-  boot with the limiter off (`ubus call service list '{"name":"nft-limiter","verbose":true}'`
-  shows the triggers).
+  Tested: syntax (`dash -n`, `node --check`), and a four-lens review of the diff. Under dash
+  on macOS, and with busybox sh, awk and sed on an MT7621 (25.12.6): the hours and days check
+  (newline values, 24:00, equal and empty hours, `*` in week, which no longer globs). On that
+  router, the patched switch run from `/tmp`: `list` and `status` on its live config, and
+  refusals of a newline hour, equal hours and a bad name before any write (nothing staged).
+  Also there: `uci set` stores a value with a newline (scratch `-c`/`-t` directory), and nft
+  refuses it inside `meta hour` (`Can't parse trailing input`), so before the fix the switch
+  login could fail every rebuild (statement injection itself was not shown). The kernel
+  refuses `limit rate over 0` (`Invalid argument`). nft folds `meta hour "12:00"-"12:00"` into
+  `meta hour "12:00"`, a single second of the day. In a scratch table, declaring an existing
+  interval set, and a dynamic set with a quota element, kept the old elements and the old
+  quota size; delete and declare in one transaction replaced both. The v3.1.10 and the patched
+  `build_chain` were dry-run against that router's live config (`nft -f` as `nft -c`,
+  `/var/run` under `/tmp`, tc and ip stubbed, nft writes blocked, busybox awk and sed). nft
+  accepted both. The bodies (counters, quota use and set elements normalized) and the tags were
+  identical, and the new transaction also deletes `nftlim_res`/`nftlim_unres`. Not yet run: a
+  real rebuild; `on` after a boot with the limiter off (`ubus call service list
+  '{"name":"nft-limiter","verbose":true}'` shows the triggers); a reservation removed live;
+  LuCI's `quota_rate` check in a browser.
 - v3.1.10 (2026-11-28): **a family switch can no longer change the wrong rule.** `nft-limiter-switch` found its rule by position and wrote by position, so a rule
   deleted or moved above it in LuCI between the read and the write, or before the commit,
   sent `on`/`off`/`hours` to a neighbour (see the invariant on uci names). It now reads the
